@@ -1717,6 +1717,13 @@ class GraphOverlayApp:
             self.grid_frame.pack_forget()
             self.post_lock_frame.pack(side=tk.LEFT, padx=4)
             self.canvas.config(cursor="crosshair")
+            # Recalculate col/row for all existing nodes using the current grid scale
+            egs = self.effective_grid_size
+            for nd in self.placed_nodes:
+                nd["col"] = round(nd["px"] / egs, 2)
+                nd["row"] = round(nd["py"] / egs, 2)
+            self._refresh_props()
+            self._refresh_export()
         else:
             self.lock_btn.config(text="🔓 Lock Grid", bg="#2a2a35", fg=TEXT_CLR)
             self.post_lock_frame.pack_forget()
@@ -1863,7 +1870,7 @@ class GraphOverlayApp:
             entry = {
                 "name":     n["name"],
                 "type":     n["type"],
-                "position": {"schematic": [n["col"], n["row"]]},
+                "position": {"schematic": [round(n["px"], 1), round(n["py"], 1)]},
                 "comment":  f"grid col={n['col']} row={n['row']}",
             }
             ref_file = n.get("_ref_file", "")
