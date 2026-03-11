@@ -10,25 +10,35 @@ Workflow:
 
 Controls:
   Scroll Wheel        → Grid zoom (before lock) / View zoom (after lock)
-  Left Click          → Place node / Select node or edge
+  Left Click/Drag     → Place node / Select / Drag node
   Middle-Drag         → Pan
   Alt+Drag            → Pan (no middle button)
   Right-Click         → Remove nearest node or edge
   Escape              → Deselect / cancel edge drawing
+
+Author: Shalini B
 """
 
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, colorchooser
 import json
 import csv
 import math
 import platform
+import copy
+import os
 
 try:
     from PIL import Image, ImageTk
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
+
+try:
+    import openpyxl
+    EXCEL_AVAILABLE = True
+except ImportError:
+    EXCEL_AVAILABLE = False
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 INITIAL_GRID_SIZE = 40
@@ -65,6 +75,41 @@ PYWR_COLORS = {
     "river_split": "#f783ac",
     "other":       "#00ffa3",
 }
+
+AVAIL_SHAPES = ["circle", "square", "triangle", "diamond", "rect"]
+
+NODE_SHAPES = {
+    "catchment":   "triangle",
+    "river":       "circle",
+    "reservoir":   "rect",
+    "storage":     "rect",
+    "demand":      "square",
+    "link":        "circle",
+    "output":      "diamond",
+    "river_gauge": "circle",
+    "river_split": "circle",
+    "other":       "circle",
+}
+
+STYLES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "styles.json")
+
+
+def _load_styles_from_file():
+    """Load PYWR_COLORS and NODE_SHAPES from styles.json if it exists."""
+    if not os.path.exists(STYLES_FILE):
+        return
+    try:
+        with open(STYLES_FILE, "r") as f:
+            data = json.load(f)
+        if "colors" in data:
+            PYWR_COLORS.update(data["colors"])
+        if "shapes" in data:
+            NODE_SHAPES.update(data["shapes"])
+    except Exception:
+        pass
+
+
+_load_styles_from_file()
 
 TYPE_DEFAULTS: dict[str, dict[str, str]] = {
     "catchment":   {"flow": ""},
@@ -130,11 +175,20 @@ class GraphOverlayApp:
         self._sel_edge_id  = None       # selected edge id
 
         # Pan drag
-        self._pan_dragging = False
-        self._pan_start_x  = 0
-        self._pan_start_y  = 0
-        self._pan_start_ox = 0.0
-        self._pan_start_oy = 0.0
+        self._pan_dragging  = False
+        self._pan_start_x   = 0
+        self._pan_start_y   = 0
+        self._pan_start_ox  = 0.0
+        self._pan_start_oy  = 0.0
+        self._alt_pan_active = False
+
+        # Node drag
+        self._drag_node_idx  = -1
+        self._drag_press_x   = 0
+        self._drag_press_y   = 0
+        self._drag_node_ox   = 0.0
+        self._drag_node_oy   = 0.0
+        self._drag_moved     = False
 
         # Hover
         self._hover_coord  = None
@@ -143,6 +197,7 @@ class GraphOverlayApp:
         # Background image
         self._bg_image = None
         self._bg_photo = None
+        self._bg_path  = None
 
         # Live property vars (rebuilt on selection change)
         self._name_var   = None
@@ -152,10 +207,96 @@ class GraphOverlayApp:
 
         self._new_node_type = tk.StringVar(value="river")
 
+        # Undo / Redo stacks
+        self._undo_stack: list = []
+        self._redo_stack: list = []
+
         self._build_toolbar()
         self._build_main_area()
         self._build_statusbar()
+
+        # Keyboard shortcuts
+        self.root.bind("<Control-z>",       self._on_ctrl_z)
+        self.root.bind("<Control-Z>",       self._on_ctrl_shift_z)
+        self.root.bind("<Control-Shift-Z>", self._on_ctrl_shift_z)
+
         self.root.after(50, self.redraw)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Undo / Redo
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _push_undo(self):
+        state = {
+            "nodes": copy.deepcopy(self.placed_nodes),
+            "edges": copy.deepcopy(self.placed_edges),
+            "node_counter": self.node_counter,
+            "edge_counter": self.edge_counter,
+        }
+        self._undo_stack.append(state)
+        if len(self._undo_stack) > 50:
+            self._undo_stack.pop(0)
+        self._redo_stack.clear()
+        self._update_undo_btns()
+
+    def _undo(self):
+        if not self._undo_stack:
+            return
+        # Save current state to redo
+        cur = {
+            "nodes": copy.deepcopy(self.placed_nodes),
+            "edges": copy.deepcopy(self.placed_edges),
+            "node_counter": self.node_counter,
+            "edge_counter": self.edge_counter,
+        }
+        self._redo_stack.append(cur)
+        state = self._undo_stack.pop()
+        self.placed_nodes  = state["nodes"]
+        self.placed_edges  = state["edges"]
+        self.node_counter  = state["node_counter"]
+        self.edge_counter  = state["edge_counter"]
+        self._sel_node_id  = None
+        self._sel_edge_id  = None
+        self._refresh_props()
+        self._refresh_export()
+        self.redraw()
+        self._update_undo_btns()
+
+    def _redo(self):
+        if not self._redo_stack:
+            return
+        cur = {
+            "nodes": copy.deepcopy(self.placed_nodes),
+            "edges": copy.deepcopy(self.placed_edges),
+            "node_counter": self.node_counter,
+            "edge_counter": self.edge_counter,
+        }
+        self._undo_stack.append(cur)
+        state = self._redo_stack.pop()
+        self.placed_nodes  = state["nodes"]
+        self.placed_edges  = state["edges"]
+        self.node_counter  = state["node_counter"]
+        self.edge_counter  = state["edge_counter"]
+        self._sel_node_id  = None
+        self._sel_edge_id  = None
+        self._refresh_props()
+        self._refresh_export()
+        self.redraw()
+        self._update_undo_btns()
+
+    def _on_ctrl_z(self, event):
+        self._undo()
+
+    def _on_ctrl_shift_z(self, event):
+        self._redo()
+
+    def _update_undo_btns(self):
+        if hasattr(self, "_undo_btn"):
+            self._undo_btn.config(
+                fg=TEXT_CLR if self._undo_stack else DIM_CLR)
+        if hasattr(self, "_redo_btn"):
+            self._redo_btn.config(
+                fg=TEXT_CLR if self._redo_stack else DIM_CLR)
 
     # ══════════════════════════════════════════════════════════════════════════
     # UI Construction
@@ -170,6 +311,8 @@ class GraphOverlayApp:
         tk.Label(inner, text="GRAPH OVERLAY — PyWR", bg=PANEL_BG, fg=ACCENT,
                  font=("Courier", 11, "bold")).pack(side=tk.LEFT, padx=(0, 10))
         tk.Button(inner, text="Load Image", command=self._load_image,
+                  **self._btn()).pack(side=tk.LEFT, padx=2)
+        tk.Button(inner, text="Styles...", command=self._open_styles,
                   **self._btn()).pack(side=tk.LEFT, padx=2)
         self._sep(inner)
 
@@ -226,10 +369,22 @@ class GraphOverlayApp:
                                   command=self._toggle_edge_mode, **self._btn())
         self.edge_btn.pack(side=tk.LEFT, padx=2)
         self._sep(self.post_lock_frame)
-        tk.Button(self.post_lock_frame, text="Undo", command=self._undo_node,
-                  **self._btn(fg="#ff6b6b")).pack(side=tk.LEFT, padx=2)
+
+        self._undo_btn = tk.Button(self.post_lock_frame, text="↩ Undo",
+                                   command=self._undo,
+                                   **self._btn(fg=DIM_CLR))
+        self._undo_btn.pack(side=tk.LEFT, padx=2)
+        self._redo_btn = tk.Button(self.post_lock_frame, text="↪ Redo",
+                                   command=self._redo,
+                                   **self._btn(fg=DIM_CLR))
+        self._redo_btn.pack(side=tk.LEFT, padx=2)
         tk.Button(self.post_lock_frame, text="Clear All", command=self._clear_all,
                   **self._btn(fg="#ff6b6b")).pack(side=tk.LEFT, padx=2)
+        self._sep(self.post_lock_frame)
+        tk.Button(self.post_lock_frame, text="Save Session",
+                  command=self._save_session, **self._btn()).pack(side=tk.LEFT, padx=2)
+        tk.Button(self.post_lock_frame, text="Load Session",
+                  command=self._load_session, **self._btn()).pack(side=tk.LEFT, padx=2)
 
         right = tk.Frame(inner, bg=PANEL_BG)
         right.pack(side=tk.RIGHT)
@@ -249,7 +404,9 @@ class GraphOverlayApp:
         self.canvas = tk.Canvas(self.main_frame, bg=BG, highlightthickness=0, cursor="arrow")
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        self.canvas.bind("<Button-1>",            self._on_click)
+        self.canvas.bind("<Button-1>",            self._on_press)
+        self.canvas.bind("<B1-Motion>",           self._on_b1_motion)
+        self.canvas.bind("<ButtonRelease-1>",     self._on_release)
         self.canvas.bind("<Motion>",              self._on_motion)
         self.canvas.bind("<Button-2>",            self._on_pan_start)
         self.canvas.bind("<B2-Motion>",           self._on_pan_motion)
@@ -405,6 +562,33 @@ class GraphOverlayApp:
         self.notebook.select(0)
 
     # ══════════════════════════════════════════════════════════════════════════
+    # Node Shape Drawing
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _draw_node_shape(self, c, cx, cy, shape, ro, ri, color, outline, width):
+        if shape == "circle":
+            c.create_oval(cx-ro, cy-ro, cx+ro, cy+ro,
+                          outline=outline, width=width, fill=BG)
+        elif shape == "square":
+            c.create_rectangle(cx-ro, cy-ro, cx+ro, cy+ro,
+                                outline=outline, width=width, fill=BG)
+        elif shape == "rect":
+            rw, rh = ro * 1.4, ro * 0.7
+            c.create_rectangle(cx-rw, cy-rh, cx+rw, cy+rh,
+                                outline=outline, width=width, fill=BG)
+        elif shape == "triangle":
+            pts = [cx, cy-ro, cx-ro, cy+ro*0.8, cx+ro, cy+ro*0.8]
+            c.create_polygon(pts, outline=outline, width=width, fill=BG)
+        elif shape == "diamond":
+            pts = [cx, cy-ro, cx+ro, cy, cx, cy+ro, cx-ro, cy]
+            c.create_polygon(pts, outline=outline, width=width, fill=BG)
+        else:
+            c.create_oval(cx-ro, cy-ro, cx+ro, cy+ro,
+                          outline=outline, width=width, fill=BG)
+        # Inner dot
+        c.create_oval(cx-ri, cy-ri, cx+ri, cy+ri, fill=color, outline="")
+
+    # ══════════════════════════════════════════════════════════════════════════
     # Properties Panel — dispatches to node or edge view
     # ══════════════════════════════════════════════════════════════════════════
 
@@ -556,15 +740,26 @@ class GraphOverlayApp:
                      font=("Courier", 9), width=15, anchor="w").pack(side=tk.LEFT)
             var = tk.StringVar(value=str(val))
             self._param_vars[key] = var
-            tk.Entry(row, textvariable=var, bg=ENTRY_BG, fg=NODE_CLR,
-                     font=("Courier", 9), relief="flat", width=9,
-                     insertbackground=NODE_CLR).pack(side=tk.LEFT, fill=tk.X,
-                                                     expand=True, padx=2)
-            def on_change(*_, k=key, v=var):
+            val_str = str(val)
+            entry_fg = "#cc5de8" if val_str.startswith("$ref::") else NODE_CLR
+            ent = tk.Entry(row, textvariable=var, bg=ENTRY_BG, fg=entry_fg,
+                           font=("Courier", 9), relief="flat", width=9,
+                           insertbackground=entry_fg)
+            ent.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+
+            def on_change(*_, k=key, v=var, e=ent):
                 n = self._node_by_id(self._sel_node_id)
                 if n:
                     n["params"][k] = v.get()
+                new_val = v.get()
+                e.config(fg="#cc5de8" if new_val.startswith("$ref::") else NODE_CLR)
             var.trace_add("write", on_change)
+
+            # Ref picker button
+            tk.Button(row, text="📎",
+                      command=lambda v=var, n=nd, k=key: self._pick_column_ref(v, n, k),
+                      bg=PANEL_BG, fg=DIM_CLR, font=("Courier", 8),
+                      relief="flat", padx=2, cursor="hand2").pack(side=tk.LEFT)
 
             def remove(k=key):
                 n = self._node_by_id(self._sel_node_id)
@@ -574,6 +769,68 @@ class GraphOverlayApp:
             tk.Button(row, text="✕", command=remove,
                       bg=PANEL_BG, fg="#554444", font=("Courier", 8),
                       relief="flat", padx=2, cursor="hand2").pack(side=tk.LEFT)
+
+    def _pick_column_ref(self, target_var, nd, key):
+        """Open a file (CSV or Excel) and let user pick a column to use as $ref::ColumnName."""
+        ftypes = [("CSV files", "*.csv")]
+        if EXCEL_AVAILABLE:
+            ftypes.insert(0, ("Excel files", "*.xlsx"))
+        ftypes.append(("All files", "*.*"))
+        path = filedialog.askopenfilename(title="Pick reference file", filetypes=ftypes)
+        if not path:
+            return
+
+        ext = os.path.splitext(path)[1].lower()
+        headers = []
+        try:
+            if ext == ".xlsx" and EXCEL_AVAILABLE:
+                wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+                ws = wb.active
+                for cell in next(ws.iter_rows(min_row=1, max_row=1)):
+                    if cell.value is not None:
+                        headers.append(str(cell.value))
+                wb.close()
+            else:
+                with open(path, "r", newline="") as f:
+                    reader = csv.reader(f)
+                    headers = next(reader, [])
+        except Exception as ex:
+            messagebox.showerror("Error", f"Could not read file:\n{ex}")
+            return
+
+        if not headers:
+            messagebox.showwarning("No columns", "No column headers found.")
+            return
+
+        # Popup to pick column
+        popup = tk.Toplevel(self.root)
+        popup.title("Pick Column")
+        popup.configure(bg=PANEL_BG)
+        popup.grab_set()
+        tk.Label(popup, text="Select column:", bg=PANEL_BG, fg=TEXT_CLR,
+                 font=("Courier", 10)).pack(padx=12, pady=(12, 4))
+        lb = tk.Listbox(popup, bg=ENTRY_BG, fg=NODE_CLR, font=("Courier", 10),
+                        selectbackground=ACCENT, selectforeground=BG,
+                        height=min(15, len(headers)), width=32)
+        lb.pack(padx=12, pady=4)
+        for h in headers:
+            lb.insert(tk.END, h)
+        if headers:
+            lb.select_set(0)
+
+        def confirm():
+            sel = lb.curselection()
+            if not sel:
+                return
+            col_name = headers[sel[0]]
+            target_var.set(f"$ref::{col_name}")
+            nd["_ref_file"] = path
+            popup.destroy()
+            self._rebuild_param_rows(nd)
+
+        tk.Button(popup, text="Use Column", command=confirm,
+                  bg=ACCENT, fg=BG, font=("Courier", 10, "bold"),
+                  relief="flat", padx=8, pady=4, cursor="hand2").pack(pady=(4, 12))
 
     def _apply_node_name(self):
         nd = self._node_by_id(self._sel_node_id)
@@ -667,6 +924,7 @@ class GraphOverlayApp:
             self.redraw()
 
     def _delete_selected_edge(self):
+        self._push_undo()
         self.placed_edges = [e for e in self.placed_edges if e["id"] != self._sel_edge_id]
         self._sel_edge_id = None
         self._refresh_props()
@@ -684,6 +942,8 @@ class GraphOverlayApp:
         nd = self._node_by_id(node_id)
         if nd is None:
             return
+
+        self._push_undo()
 
         original_name = nd["name"]
         # Rename the original to _a
@@ -715,6 +975,155 @@ class GraphOverlayApp:
         self.redraw()
 
     # ══════════════════════════════════════════════════════════════════════════
+    # Styles Dialog
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _open_styles(self):
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Node Styles")
+        dlg.configure(bg=PANEL_BG)
+        dlg.grab_set()
+        dlg.resizable(False, False)
+
+        tk.Label(dlg, text="NODE STYLES", bg=PANEL_BG, fg=ACCENT,
+                 font=("Courier", 11, "bold")).pack(padx=16, pady=(12, 6))
+
+        color_vars  = {}
+        shape_vars  = {}
+        swatch_btns = {}
+
+        frame = tk.Frame(dlg, bg=PANEL_BG)
+        frame.pack(padx=16, pady=4)
+
+        for ntype in PYWR_NODE_TYPES:
+            row = tk.Frame(frame, bg=PANEL_BG)
+            row.pack(fill=tk.X, pady=2)
+            tk.Label(row, text=ntype, bg=PANEL_BG, fg=TEXT_CLR,
+                     font=("Courier", 9), width=14, anchor="w").pack(side=tk.LEFT)
+
+            clr = PYWR_COLORS.get(ntype, NODE_CLR)
+            color_vars[ntype] = tk.StringVar(value=clr)
+
+            def pick_color(nt=ntype, cv=color_vars):
+                result = colorchooser.askcolor(color=cv[nt].get(), title=f"Color for {nt}")
+                if result and result[1]:
+                    cv[nt].set(result[1])
+                    PYWR_COLORS[nt] = result[1]
+                    swatch_btns[nt].config(bg=result[1])
+                    self.redraw()
+
+            swatch = tk.Button(row, bg=clr, width=3, relief="flat",
+                               cursor="hand2", command=lambda nt=ntype: pick_color(nt))
+            swatch.pack(side=tk.LEFT, padx=4)
+            swatch_btns[ntype] = swatch
+
+            shp = NODE_SHAPES.get(ntype, "circle")
+            sv = tk.StringVar(value=shp)
+            shape_vars[ntype] = sv
+
+            def on_shape_change(nt=ntype, sv2=sv):
+                NODE_SHAPES[nt] = sv2.get()
+                self.redraw()
+
+            cb = ttk.Combobox(row, textvariable=sv, values=AVAIL_SHAPES,
+                              state="readonly", width=10, font=("Courier", 9))
+            cb.pack(side=tk.LEFT, padx=4)
+            sv.trace_add("write", lambda *_, nt=ntype, sv2=sv: on_shape_change(nt, sv2))
+
+        def save_styles():
+            data = {
+                "colors": dict(PYWR_COLORS),
+                "shapes": dict(NODE_SHAPES),
+            }
+            try:
+                with open(STYLES_FILE, "w") as f:
+                    json.dump(data, f, indent=2)
+                messagebox.showinfo("Saved", f"Styles saved to:\n{STYLES_FILE}")
+            except Exception as ex:
+                messagebox.showerror("Error", f"Could not save styles:\n{ex}")
+
+        tk.Button(dlg, text="Save Styles", command=save_styles,
+                  bg=ACCENT, fg=BG, font=("Courier", 10, "bold"),
+                  relief="flat", padx=10, pady=4, cursor="hand2"
+                  ).pack(pady=(8, 14))
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Session Save / Load
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _save_session(self):
+        path = filedialog.asksaveasfilename(
+            title="Save Session",
+            defaultextension=".goverlap",
+            filetypes=[("Graph Overlay Session", "*.goverlap"), ("All", "*.*")])
+        if not path:
+            return
+        data = {
+            "grid_zoom":     self.grid_zoom,
+            "global_zoom":   self.global_zoom,
+            "pan_x":         self.pan_x,
+            "pan_y":         self.pan_y,
+            "grid_opacity":  self.grid_opacity,
+            "node_counter":  self.node_counter,
+            "edge_counter":  self.edge_counter,
+            "nodes":         self.placed_nodes,
+            "edges":         self.placed_edges,
+            "bg_image_path": self._bg_path,
+        }
+        try:
+            with open(path, "w") as f:
+                json.dump(data, f, indent=2)
+            messagebox.showinfo("Session Saved", f"Session saved:\n{path}")
+        except Exception as ex:
+            messagebox.showerror("Error", f"Could not save session:\n{ex}")
+
+    def _load_session(self):
+        path = filedialog.askopenfilename(
+            title="Load Session",
+            filetypes=[("Graph Overlay Session", "*.goverlap"), ("All", "*.*")])
+        if not path:
+            return
+        try:
+            with open(path, "r") as f:
+                data = json.load(f)
+        except Exception as ex:
+            messagebox.showerror("Error", f"Could not load session:\n{ex}")
+            return
+
+        self.grid_zoom    = data.get("grid_zoom",    1.0)
+        self.global_zoom  = data.get("global_zoom",  1.0)
+        self.pan_x        = data.get("pan_x",        0.0)
+        self.pan_y        = data.get("pan_y",        0.0)
+        self.grid_opacity = data.get("grid_opacity", 0.45)
+        self.node_counter = data.get("node_counter", 1)
+        self.edge_counter = data.get("edge_counter", 1)
+        self.placed_nodes = data.get("nodes", [])
+        self.placed_edges = data.get("edges", [])
+
+        bg_path = data.get("bg_image_path")
+        if bg_path and os.path.exists(bg_path) and PIL_AVAILABLE:
+            try:
+                self._bg_image = Image.open(bg_path)
+                self._bg_path  = bg_path
+            except Exception:
+                self._bg_image = None
+                self._bg_path  = None
+        else:
+            self._bg_image = None
+            self._bg_path  = None
+
+        self.grid_zoom_lbl.config(text=f"{self.grid_zoom:.2f}×")
+        self.global_zoom_lbl.config(text=f"{self.global_zoom:.2f}×")
+        self.opacity_var.set(self.grid_opacity)
+        self.opacity_lbl.config(text=f"{int(self.grid_opacity*100)}%")
+
+        self._sel_node_id = None
+        self._sel_edge_id = None
+        self._refresh_props()
+        self._refresh_export()
+        self.redraw()
+
+    # ══════════════════════════════════════════════════════════════════════════
     # Image Loading
     # ══════════════════════════════════════════════════════════════════════════
 
@@ -729,6 +1138,7 @@ class GraphOverlayApp:
             return
         try:
             self._bg_image = Image.open(path)
+            self._bg_path  = path
             self.net_var.set(False); self.show_network = False
             self.redraw()
         except Exception as e:
@@ -831,6 +1241,7 @@ class GraphOverlayApp:
             is_sel = (nd["id"] == self._sel_node_id)
             is_src = (self.edge_mode and self._edge_src == nd["id"])
             ro, ri = 14*gz, 5*gz
+            shape  = NODE_SHAPES.get(nd["type"], "circle")
 
             if is_sel:
                 c.create_oval(sx-ro-5,sy-ro-5,sx+ro+5,sy+ro+5,
@@ -839,9 +1250,9 @@ class GraphOverlayApp:
                 c.create_oval(sx-ro-5,sy-ro-5,sx+ro+5,sy+ro+5,
                               outline=SEL_CLR,width=3,fill="")
 
-            c.create_oval(sx-ro,sy-ro,sx+ro,sy+ro,
-                          outline=color,width=3 if is_sel else 2,fill=BG)
-            c.create_oval(sx-ri,sy-ri,sx+ri,sy+ri,fill=color,outline="")
+            self._draw_node_shape(c, sx, sy, shape, ro, ri, color,
+                                  outline=color,
+                                  width=3 if is_sel else 2)
 
             n_p   = len(nd.get("params", {}))
             phint = f" +{n_p}p" if n_p else ""
@@ -888,13 +1299,94 @@ class GraphOverlayApp:
     # Event Handlers
     # ══════════════════════════════════════════════════════════════════════════
 
-    def _on_click(self, event):
+    def _on_press(self, event):
+        """Button-1 press: record start position; detect drag target."""
+        self._drag_press_x = event.x
+        self._drag_press_y = event.y
+        self._drag_moved   = False
+        self._drag_node_idx = -1
+
         if not self.grid_locked:
             return
         if self.edge_mode:
-            self._handle_edge_click(event); return
+            return
+        if self._alt_pan_active:
+            return
 
-        # 1. Check for nearby node
+        idx, _ = self._nearest_node(event.x, event.y, threshold=22)
+        if idx >= 0:
+            self._drag_node_idx = idx
+            nd = self.placed_nodes[idx]
+            self._drag_node_ox = nd["px"]
+            self._drag_node_oy = nd["py"]
+
+    def _on_b1_motion(self, event):
+        """B1-Motion: drag a node if one was pressed, else hover update."""
+        if self._alt_pan_active:
+            return
+        if not self.grid_locked:
+            return
+
+        dx = event.x - self._drag_press_x
+        dy = event.y - self._drag_press_y
+        dist = math.hypot(dx, dy)
+
+        if self._drag_node_idx >= 0:
+            if dist >= 4 and not self._drag_moved:
+                # Start of drag — push undo
+                self._push_undo()
+                self._drag_moved = True
+
+            if self._drag_moved:
+                nd = self.placed_nodes[self._drag_node_idx]
+                # Convert screen delta to world space
+                new_px = self._drag_node_ox + dx / self.global_zoom
+                new_py = self._drag_node_oy + dy / self.global_zoom
+                nd["px"] = round(new_px, 1)
+                nd["py"] = round(new_py, 1)
+                egs = self.effective_grid_size
+                nd["col"] = round(new_px / egs, 2)
+                nd["row"] = round(new_py / egs, 2)
+                self.canvas.config(cursor="fleur")
+                self.redraw()
+        else:
+            if self.grid_locked and not self.edge_mode:
+                self._hover_coord  = self.screen_to_grid(event.x, event.y)
+                self._hover_screen = (event.x, event.y)
+                self.redraw()
+
+    def _on_release(self, event):
+        """ButtonRelease-1: if not dragged, treat as click."""
+        if self._alt_pan_active:
+            return
+        if not self.grid_locked:
+            return
+
+        dx = event.x - self._drag_press_x
+        dy = event.y - self._drag_press_y
+        dist = math.hypot(dx, dy)
+
+        if self._drag_moved:
+            # Finalize drag — update props if node is selected
+            self._drag_moved = False
+            self._drag_node_idx = -1
+            self.canvas.config(cursor="crosshair")
+            if self._sel_node_id is not None:
+                self._refresh_props()
+            self._refresh_export()
+            self.redraw()
+            return
+
+        self._drag_node_idx = -1
+
+        if dist >= 4:
+            return
+
+        # Treat as a click
+        if self.edge_mode:
+            self._handle_edge_click(event)
+            return
+
         idx, d_node = self._nearest_node(event.x, event.y, threshold=22)
         if idx >= 0:
             self._sel_node_id = self.placed_nodes[idx]["id"]
@@ -902,7 +1394,6 @@ class GraphOverlayApp:
             self._refresh_props(); self._switch_to_props()
             self.redraw(); return
 
-        # 2. Check for nearby edge
         eidx, d_edge = self._nearest_edge(event.x, event.y, threshold=10)
         if eidx >= 0:
             self._sel_edge_id = self.placed_edges[eidx]["id"]
@@ -910,8 +1401,9 @@ class GraphOverlayApp:
             self._refresh_props(); self._switch_to_props()
             self.redraw(); return
 
-        # 3. Empty canvas — place new node
+        # Empty canvas — place new node
         self._sel_node_id = None; self._sel_edge_id = None
+        self._push_undo()
         self._place_node(event)
         self._sel_node_id = self.placed_nodes[-1]["id"]
         self._refresh_props(); self._switch_to_props()
@@ -945,6 +1437,7 @@ class GraphOverlayApp:
                 # Check not duplicate
                 existing = {(e["src"], e["dst"]) for e in self.placed_edges}
                 if (self._edge_src, cid) not in existing and (cid, self._edge_src) not in existing:
+                    self._push_undo()
                     self.placed_edges.append({
                         "id":  self.edge_counter,
                         "src": self._edge_src,
@@ -961,6 +1454,7 @@ class GraphOverlayApp:
         eidx, d_edge = self._nearest_edge(event.x, event.y, threshold=12)
 
         if idx >= 0 and d_node * self.global_zoom <= d_edge:
+            self._push_undo()
             removed_id = self.placed_nodes.pop(idx)["id"]
             self.placed_edges = [e for e in self.placed_edges
                                  if e["src"] != removed_id and e["dst"] != removed_id]
@@ -968,6 +1462,7 @@ class GraphOverlayApp:
             if self._sel_node_id == removed_id:
                 self._sel_node_id = None; self._refresh_props()
         elif eidx >= 0:
+            self._push_undo()
             removed_eid = self.placed_edges.pop(eidx)["id"]
             if self._sel_edge_id == removed_eid:
                 self._sel_edge_id = None; self._refresh_props()
@@ -975,6 +1470,8 @@ class GraphOverlayApp:
         self.redraw(); self._refresh_export()
 
     def _on_motion(self, event):
+        if self._drag_node_idx >= 0:
+            return  # handled by _on_b1_motion
         if self.grid_locked and not self.edge_mode:
             self._hover_coord  = self.screen_to_grid(event.x, event.y)
             self._hover_screen = (event.x, event.y)
@@ -995,7 +1492,8 @@ class GraphOverlayApp:
         self.redraw()
 
     def _on_pan_start(self, event):
-        self._pan_dragging = True
+        self._pan_dragging  = True
+        self._alt_pan_active = True
         self._pan_start_x, self._pan_start_y = event.x, event.y
         self._pan_start_ox, self._pan_start_oy = self.pan_x, self.pan_y
         self.canvas.config(cursor="fleur")
@@ -1007,7 +1505,8 @@ class GraphOverlayApp:
         self.redraw()
 
     def _on_pan_end(self, event):
-        self._pan_dragging = False
+        self._pan_dragging   = False
+        self._alt_pan_active = False
         self.canvas.config(cursor="crosshair" if self.grid_locked else "arrow")
 
     def _on_scroll_mac(self, event):
@@ -1073,16 +1572,8 @@ class GraphOverlayApp:
                              fg=BG      if self.edge_mode else TEXT_CLR)
         self.redraw()
 
-    def _undo_node(self):
-        if not self.placed_nodes: return
-        removed_id = self.placed_nodes.pop()["id"]
-        self.placed_edges = [e for e in self.placed_edges
-                             if e["src"] != removed_id and e["dst"] != removed_id]
-        if self._sel_node_id == removed_id:
-            self._sel_node_id = None; self._refresh_props()
-        self.redraw(); self._refresh_export()
-
     def _clear_all(self):
+        self._push_undo()
         self.placed_nodes.clear(); self.placed_edges.clear()
         self.node_counter = 1; self.edge_counter = 1
         self._edge_src = None; self._sel_node_id = None; self._sel_edge_id = None
@@ -1114,6 +1605,13 @@ class GraphOverlayApp:
         if not self.placed_nodes:
             tk.Label(self.export_tab, text="Place nodes first.",
                      bg=PANEL_BG, fg="#555555", font=("Courier", 9)).pack(pady=30)
+            # Still show import CSV button
+            bf2 = tk.Frame(self.export_tab, bg=PANEL_BG)
+            bf2.pack(fill=tk.X, padx=10, pady=4)
+            tk.Button(bf2, text="Import CSV", command=self._import_csv,
+                      bg="#22334a", fg="#74c0fc", font=("Courier", 9, "bold"),
+                      relief="flat", padx=6, pady=4, cursor="hand2"
+                      ).pack(side=tk.LEFT, padx=1)
             return
 
         # Node table
@@ -1175,15 +1673,26 @@ class GraphOverlayApp:
         bf = tk.Frame(self.export_tab, bg=PANEL_BG)
         bf.pack(fill=tk.X, padx=10, pady=8)
         for label, cmd, bg, fg in [
-            ("Copy",      self._copy_json,     ACCENT,    BG),
-            ("JSON",      self._save_json,      "#339af0", "white"),
-            ("CSV",       self._save_csv,       "#51cf66", BG),
-            ("PyWR JSON", self._save_pywr_json, "#fcc419", BG),
+            ("Copy",       self._copy_json,      ACCENT,    BG),
+            ("JSON",       self._save_json,       "#339af0", "white"),
+            ("CSV",        self._save_csv,        "#51cf66", BG),
+            ("PyWR JSON",  self._save_pywr_json,  "#fcc419", BG),
         ]:
             tk.Button(bf, text=label, command=cmd, bg=bg, fg=fg,
                       font=("Courier",9,"bold"), relief="flat",
                       padx=4, pady=5, cursor="hand2"
                       ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=1)
+
+        bf2 = tk.Frame(self.export_tab, bg=PANEL_BG)
+        bf2.pack(fill=tk.X, padx=10, pady=(0, 8))
+        tk.Button(bf2, text="Import CSV", command=self._import_csv,
+                  bg="#22334a", fg="#74c0fc", font=("Courier", 9, "bold"),
+                  relief="flat", padx=6, pady=4, cursor="hand2"
+                  ).pack(side=tk.LEFT, padx=1)
+        tk.Button(bf2, text="Export PNG", command=self._export_png,
+                  bg="#2a3a2a", fg="#51cf66", font=("Courier", 9, "bold"),
+                  relief="flat", padx=6, pady=4, cursor="hand2"
+                  ).pack(side=tk.LEFT, padx=1)
 
     # ── Export builders ───────────────────────────────────────────────────────
 
@@ -1192,10 +1701,31 @@ class GraphOverlayApp:
         for n in self.placed_nodes:
             entry = {"name": n["name"], "type": n["type"],
                      "comment": f"grid col={n['col']} row={n['row']}"}
+            ref_file = n.get("_ref_file", "")
             for k, v in n.get("params", {}).items():
-                if str(v).strip():
+                vs = str(v).strip()
+                if not vs:
+                    continue
+                if vs.startswith("$ref::") and ref_file:
+                    col_name = vs[len("$ref::"):]
+                    ext = os.path.splitext(ref_file)[1].lower()
                     try:
-                        entry[k] = float(v) if "." in str(v) else int(v)
+                        rel_path = os.path.relpath(ref_file)
+                    except ValueError:
+                        rel_path = ref_file
+                    if ext == ".xlsx":
+                        entry[k] = {"type": "ExcelParameter",
+                                    "url": rel_path,
+                                    "column": col_name}
+                    else:
+                        entry[k] = {"type": "CSVParameter",
+                                    "url": rel_path,
+                                    "column": col_name,
+                                    "index_col": "Date",
+                                    "parse_dates": True}
+                else:
+                    try:
+                        entry[k] = float(vs) if "." in vs else int(vs)
                     except ValueError:
                         entry[k] = v
             nodes.append(entry)
@@ -1280,6 +1810,116 @@ class GraphOverlayApp:
             with open(path,"w") as f:
                 json.dump(self._get_pywr_json(), f, indent=2)
             messagebox.showinfo("Saved", f"PyWR model saved:\n{path}")
+
+    def _import_csv(self):
+        """Import nodes (and optionally edges) from CSV, appending to existing."""
+        path = filedialog.askopenfilename(
+            title="Import Nodes CSV",
+            filetypes=[("CSV", "*.csv"), ("All", "*.*")])
+        if not path:
+            return
+
+        self._push_undo()
+
+        base_fields = {"id", "name", "type", "col", "row", "px", "py"}
+        imported_nodes = 0
+        node_name_map: dict[str, int] = {}  # name → new id (for edge import)
+
+        try:
+            with open(path, "r", newline="") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    ntype = row.get("type", "other")
+                    if ntype not in PYWR_NODE_TYPES:
+                        ntype = "other"
+                    try:
+                        px = float(row.get("px", 0))
+                        py = float(row.get("py", 0))
+                        col = float(row.get("col", 0))
+                        row_val = float(row.get("row", 0))
+                    except (ValueError, TypeError):
+                        px, py, col, row_val = 0.0, 0.0, 0.0, 0.0
+
+                    params = {}
+                    for k, v in row.items():
+                        if k not in base_fields and k and v:
+                            params[k] = v
+
+                    nd = {
+                        "id":     self.node_counter,
+                        "name":   row.get("name", f"N{self.node_counter}"),
+                        "type":   ntype,
+                        "col":    col,
+                        "row":    row_val,
+                        "px":     px,
+                        "py":     py,
+                        "params": params,
+                    }
+                    node_name_map[nd["name"]] = self.node_counter
+                    self.placed_nodes.append(nd)
+                    self.node_counter += 1
+                    imported_nodes += 1
+        except Exception as ex:
+            messagebox.showerror("Import Error", f"Could not read nodes CSV:\n{ex}")
+            return
+
+        # Try to load edges CSV alongside
+        epath = path.replace(".csv", "_edges.csv")
+        imported_edges = 0
+        if os.path.exists(epath):
+            try:
+                with open(epath, "r", newline="") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        src_name = row.get("src", "")
+                        dst_name = row.get("dst", "")
+                        src_id = node_name_map.get(src_name)
+                        dst_id = node_name_map.get(dst_name)
+                        if src_id is not None and dst_id is not None:
+                            existing = {(e["src"], e["dst"]) for e in self.placed_edges}
+                            if (src_id, dst_id) not in existing:
+                                self.placed_edges.append({
+                                    "id":   self.edge_counter,
+                                    "src":  src_id,
+                                    "dst":  dst_id,
+                                    "name": row.get("name", f"E{self.edge_counter}"),
+                                })
+                                self.edge_counter += 1
+                                imported_edges += 1
+            except Exception:
+                pass
+
+        self._refresh_props()
+        self._refresh_export()
+        self.redraw()
+        msg = f"Imported {imported_nodes} nodes"
+        if imported_edges:
+            msg += f", {imported_edges} edges"
+        messagebox.showinfo("Import Complete", msg)
+
+    def _export_png(self):
+        """Export the canvas as a PNG screenshot."""
+        if not PIL_AVAILABLE:
+            messagebox.showwarning("Pillow Required", "pip install pillow")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Export PNG",
+            defaultextension=".png",
+            filetypes=[("PNG", "*.png"), ("All", "*.*")])
+        if not path:
+            return
+        try:
+            from PIL import ImageGrab
+            self.canvas.update_idletasks()
+            x  = self.canvas.winfo_rootx()
+            y  = self.canvas.winfo_rooty()
+            w  = self.canvas.winfo_width()
+            h  = self.canvas.winfo_height()
+            img = ImageGrab.grab(bbox=(x, y, x + w, y + h))
+            img.save(path)
+            messagebox.showinfo("Exported", f"Canvas exported to:\n{path}")
+        except Exception as ex:
+            messagebox.showerror("Export Error", f"Could not export PNG:\n{ex}")
 
 
 def main():
