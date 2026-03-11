@@ -1,0 +1,11 @@
+id,name,src,dst
+1,E1,Rainfall_Catchment,River_Main
+2,E2,GW_Base,GW_Total
+3,E3,GW_Topup,GW_Total
+4,E4,GW_Total,River_Main
+5,E5,River_Main,River_Gauge_A
+6,E6,River_Gauge_A,Reservoir_A
+7,E7,Reservoir_A,River_Split_A
+8,E8,River_Split_A,Demand_Urban
+9,E9,River_Split_A,Demand_Irrigation
+10,E10,River_Split_A,River_Outlet

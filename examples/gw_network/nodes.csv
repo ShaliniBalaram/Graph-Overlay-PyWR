@@ -1,0 +1,12 @@
+id,name,type,col,row,px,py,flow,max_flow,min_flow,cost,mrf,mrf_cost,max_volume,min_volume,initial_volume,factors
+1,Rainfall_Catchment,catchment,2.0,1.0,80.0,40.0,,,,,,,,,
+2,GW_Base,input,4.0,3.0,160.0,120.0,,50.0,0.0,1.0,,,,,
+3,GW_Topup,input,6.0,3.0,240.0,120.0,,20.0,0.0,5.0,,,,,
+4,GW_Total,link,5.0,5.0,200.0,200.0,,,,0.0,,,,,
+5,River_Main,river,8.0,1.0,320.0,40.0,,,,0.0,,,,,
+6,River_Gauge_A,rivergauge,8.0,3.0,320.0,120.0,,,,0.0,10.0,-500.0,,,
+7,Reservoir_A,reservoir,10.0,3.0,400.0,120.0,,,,0.0,,,500.0,50.0,350.0
+8,River_Split_A,riversplit,10.0,6.0,400.0,240.0,,,,0.0,,,,,,0.6
+9,Demand_Urban,output,12.0,5.0,480.0,200.0,,80.0,0.0,-200.0,,,,,
+10,Demand_Irrigation,output,12.0,7.0,480.0,280.0,,40.0,0.0,-100.0,,,,,
+11,River_Outlet,output,14.0,3.0,560.0,120.0,,,,,-500.0,,,,,

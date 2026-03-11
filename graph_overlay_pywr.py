@@ -60,35 +60,90 @@ SEL_CLR    = "#ffdd00"
 ENTRY_BG   = "#22222e"
 
 PYWR_NODE_TYPES = [
-    "catchment", "river", "reservoir", "storage",
-    "demand", "link", "output", "river_gauge", "river_split", "other",
+    # Core nodes
+    "input", "output", "link", "storage",
+    "losslink", "delaynode", "breaklink", "piecewiselink", "multisplitlink",
+    # Virtual storage / licence accounting
+    "virtualstorage", "annualvirtualstorage", "seasonalvirtualstorage",
+    "monthlyvirtualstorage", "rollingvirtualstorage",
+    # Aggregate / monitoring (non-connectable)
+    "aggregatednode", "aggregatedstorage",
+    # River domain
+    "catchment", "discharge", "river", "reservoir",
+    "rivergauge", "riversplit", "riversplithwithgauge",
+    # Groundwater domain
+    "keatingaquifer",
+    # Fallback
+    "other",
 ]
 PYWR_COLORS = {
-    "catchment":   "#51cf66",
-    "river":       "#339af0",
-    "reservoir":   "#74c0fc",
-    "storage":     "#4dabf7",
-    "demand":      "#ff6b6b",
-    "link":        "#fcc419",
-    "output":      "#ff922b",
-    "river_gauge": "#cc5de8",
-    "river_split": "#f783ac",
-    "other":       "#00ffa3",
+    # Core
+    "input":                  "#51cf66",   # green  — abstraction, GW, borehole
+    "output":                 "#ff922b",   # orange
+    "link":                   "#fcc419",   # yellow
+    "storage":                "#4dabf7",   # blue
+    "losslink":               "#e64980",   # pink
+    "delaynode":              "#be4bdb",   # purple
+    "breaklink":              "#868e96",   # grey
+    "piecewiselink":          "#f76707",   # deep orange
+    "multisplitlink":         "#f783ac",   # light pink
+    # Virtual storage
+    "virtualstorage":         "#20c997",   # teal
+    "annualvirtualstorage":   "#12b886",
+    "seasonalvirtualstorage": "#0ca678",
+    "monthlyvirtualstorage":  "#099268",
+    "rollingvirtualstorage":  "#087f5b",
+    # Aggregate
+    "aggregatednode":         "#a9e34b",   # lime
+    "aggregatedstorage":      "#74b816",   # olive
+    # River domain
+    "catchment":              "#51cf66",
+    "discharge":              "#69db7c",   # lighter green
+    "river":                  "#339af0",
+    "reservoir":              "#74c0fc",
+    "rivergauge":             "#cc5de8",
+    "riversplit":             "#f783ac",
+    "riversplithwithgauge":   "#e599f7",
+    # Groundwater domain
+    "keatingaquifer":         "#748ffc",   # indigo
+    # Other
+    "other":                  "#00ffa3",
 }
 
 AVAIL_SHAPES = ["circle", "square", "triangle", "diamond", "rect"]
 
 NODE_SHAPES = {
-    "catchment":   "triangle",
-    "river":       "circle",
-    "reservoir":   "rect",
-    "storage":     "rect",
-    "demand":      "square",
-    "link":        "circle",
-    "output":      "diamond",
-    "river_gauge": "circle",
-    "river_split": "circle",
-    "other":       "circle",
+    # Core
+    "input":                  "triangle",
+    "output":                 "diamond",
+    "link":                   "circle",
+    "storage":                "rect",
+    "losslink":               "circle",
+    "delaynode":              "square",
+    "breaklink":              "circle",
+    "piecewiselink":          "circle",
+    "multisplitlink":         "circle",
+    # Virtual storage
+    "virtualstorage":         "rect",
+    "annualvirtualstorage":   "rect",
+    "seasonalvirtualstorage": "rect",
+    "monthlyvirtualstorage":  "rect",
+    "rollingvirtualstorage":  "rect",
+    # Aggregate
+    "aggregatednode":         "diamond",
+    "aggregatedstorage":      "diamond",
+    # River domain
+    "catchment":              "triangle",
+    "discharge":              "triangle",
+    "river":                  "circle",
+    "reservoir":              "rect",
+    "rivergauge":             "circle",
+    "riversplit":             "circle",
+    "riversplithwithgauge":   "circle",
+    # Groundwater
+    "keatingaquifer":         "rect",
+    # Other
+    "other":                  "circle",
 }
 
 STYLES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "styles.json")
@@ -112,18 +167,47 @@ def _load_styles_from_file():
 _load_styles_from_file()
 
 TYPE_DEFAULTS: dict[str, dict[str, str]] = {
-    "catchment":   {"flow": ""},
-    "river":       {"cost": "0.0", "min_flow": "0.0"},
-    "reservoir":   {"max_volume": "", "min_volume": "0.0",
-                    "initial_volume": "", "cost": "0.0"},
-    "storage":     {"max_volume": "", "min_volume": "0.0",
-                    "initial_volume": "", "cost": "0.0"},
-    "demand":      {"max_flow": "", "cost": "-10.0"},
-    "link":        {"cost": "0.0", "max_flow": "", "min_flow": "0.0"},
-    "output":      {"max_flow": "", "cost": "-500.0"},
-    "river_gauge": {"flow_parameter": "", "threshold": ""},
-    "river_split": {"factors": "0.5, 0.5"},
-    "other":       {},
+    # Core
+    "input":                  {"max_flow": "", "min_flow": "0.0", "cost": "0.0"},
+    "output":                 {"max_flow": "", "min_flow": "0.0", "cost": "-500.0"},
+    "link":                   {"cost": "0.0", "max_flow": "", "min_flow": "0.0"},
+    "storage":                {"max_volume": "", "min_volume": "0.0",
+                               "initial_volume": "", "cost": "0.0"},
+    "losslink":               {"loss_factor": "0.1", "max_flow": "",
+                               "min_flow": "0.0", "cost": "0.0"},
+    "delaynode":              {"days": "1", "initial_flow": "0.0"},
+    "breaklink":              {"max_flow": "", "min_flow": "0.0", "cost": "0.0"},
+    "piecewiselink":          {"nsteps": "2"},
+    "multisplitlink":         {"nsteps": "2", "extra_slots": "1"},
+    # Virtual storage
+    "virtualstorage":         {"max_volume": "", "min_volume": "0.0",
+                               "initial_volume": ""},
+    "annualvirtualstorage":   {"max_volume": "", "min_volume": "0.0",
+                               "initial_volume": "", "reset_day": "1", "reset_month": "1"},
+    "seasonalvirtualstorage": {"max_volume": "", "min_volume": "0.0",
+                               "initial_volume": "", "reset_day": "1", "reset_month": "1",
+                               "end_day": "31", "end_month": "12"},
+    "monthlyvirtualstorage":  {"max_volume": "", "min_volume": "0.0",
+                               "initial_volume": "", "months": "1"},
+    "rollingvirtualstorage":  {"max_volume": "", "min_volume": "0.0",
+                               "initial_volume": "", "days": "30"},
+    # Aggregate
+    "aggregatednode":         {},
+    "aggregatedstorage":      {},
+    # River domain
+    "catchment":              {"flow": ""},
+    "discharge":              {"flow": ""},
+    "river":                  {"cost": "0.0", "min_flow": "0.0"},
+    "reservoir":              {"max_volume": "", "min_volume": "0.0",
+                               "initial_volume": "", "cost": "0.0"},
+    "rivergauge":             {"mrf": "0.0", "mrf_cost": "0.0", "cost": "0.0"},
+    "riversplit":             {"factors": "0.5, 0.5"},
+    "riversplithwithgauge":   {"mrf": "0.0", "mrf_cost": "0.0", "cost": "0.0",
+                               "factors": "0.5, 0.5"},
+    # Groundwater
+    "keatingaquifer":         {"num_streams": "1", "num_additional_inputs": "1"},
+    # Other
+    "other":                  {},
 }
 
 SAMPLE_NODES = [
@@ -175,12 +259,14 @@ class GraphOverlayApp:
         self._sel_edge_id  = None       # selected edge id
 
         # Pan drag
-        self._pan_dragging  = False
-        self._pan_start_x   = 0
-        self._pan_start_y   = 0
-        self._pan_start_ox  = 0.0
-        self._pan_start_oy  = 0.0
+        self._pan_dragging   = False
+        self._pan_start_x    = 0
+        self._pan_start_y    = 0
+        self._pan_start_ox   = 0.0
+        self._pan_start_oy   = 0.0
         self._alt_pan_active = False
+        self._pan_mode       = False   # dedicated pan-mode toggle
+        self._space_panning  = False   # space+drag pan
 
         # Node drag
         self._drag_node_idx  = -1
@@ -219,6 +305,10 @@ class GraphOverlayApp:
         self.root.bind("<Control-z>",       self._on_ctrl_z)
         self.root.bind("<Control-Z>",       self._on_ctrl_shift_z)
         self.root.bind("<Control-Shift-Z>", self._on_ctrl_shift_z)
+        self.canvas.bind("<KeyPress-space>",   self._on_space_press)
+        self.canvas.bind("<KeyRelease-space>", self._on_space_release)
+        self.canvas.bind("<FocusIn>",  lambda e: None)
+        self.canvas.bind("<FocusOut>", lambda e: None)
 
         self.root.after(50, self.redraw)
 
@@ -368,6 +458,9 @@ class GraphOverlayApp:
         self.edge_btn = tk.Button(self.post_lock_frame, text="Draw Edge",
                                   command=self._toggle_edge_mode, **self._btn())
         self.edge_btn.pack(side=tk.LEFT, padx=2)
+        self.pan_btn = tk.Button(self.post_lock_frame, text="✋ Pan",
+                                 command=self._toggle_pan_mode, **self._btn())
+        self.pan_btn.pack(side=tk.LEFT, padx=2)
         self._sep(self.post_lock_frame)
 
         self._undo_btn = tk.Button(self.post_lock_frame, text="↩ Undo",
@@ -425,6 +518,17 @@ class GraphOverlayApp:
             self.canvas.bind("<MouseWheel>", self._on_scroll_win)
             self.canvas.bind("<Button-4>",   lambda e: self._do_scroll(1.08, e))
             self.canvas.bind("<Button-5>",   lambda e: self._do_scroll(0.92, e))
+
+        # Collapse toggle strip on the left edge of the right panel
+        self._panel_visible = True
+        toggle_strip = tk.Frame(self.main_frame, bg=BORDER_CLR, width=14, cursor="hand2")
+        toggle_strip.pack(side=tk.RIGHT, fill=tk.Y)
+        toggle_strip.pack_propagate(False)
+        self._toggle_lbl = tk.Label(toggle_strip, text="◀", bg=BORDER_CLR, fg=ACCENT,
+                                    font=("Courier", 9), cursor="hand2")
+        self._toggle_lbl.pack(expand=True)
+        toggle_strip.bind("<Button-1>", lambda e: self._toggle_panel())
+        self._toggle_lbl.bind("<Button-1>", lambda e: self._toggle_panel())
 
         # Right panel — always visible, two tabs
         self.right_panel = tk.Frame(self.main_frame, bg=PANEL_BG, width=350)
@@ -547,6 +651,35 @@ class GraphOverlayApp:
                         lambda e: widget.yview_scroll(-1 if e.delta>0 else 1, "units"))
             widget.bind("<Button-4>", lambda e: widget.yview_scroll(-1, "units"))
             widget.bind("<Button-5>", lambda e: widget.yview_scroll(1,  "units"))
+
+    def _toggle_panel(self):
+        self._panel_visible = not self._panel_visible
+        if self._panel_visible:
+            self.right_panel.pack(side=tk.RIGHT, fill=tk.Y)
+            self._toggle_lbl.config(text="◀")
+        else:
+            self.right_panel.pack_forget()
+            self._toggle_lbl.config(text="▶")
+
+    def _toggle_pan_mode(self):
+        self._pan_mode = not self._pan_mode
+        self.pan_btn.config(
+            bg="#74c0fc" if self._pan_mode else "#2a2a35",
+            fg=BG        if self._pan_mode else TEXT_CLR)
+        self.canvas.config(cursor="fleur" if self._pan_mode else "crosshair")
+
+    def _is_panning(self):
+        return self._pan_mode or self._space_panning or self._alt_pan_active
+
+    def _on_space_press(self, event):
+        if not self._space_panning:
+            self._space_panning = True
+            self.canvas.config(cursor="fleur")
+
+    def _on_space_release(self, event):
+        self._space_panning = False
+        if not self._pan_mode and not self._alt_pan_active:
+            self.canvas.config(cursor="crosshair" if self.grid_locked else "arrow")
 
     def _deselect(self):
         self._sel_node_id = None
@@ -1301,16 +1434,22 @@ class GraphOverlayApp:
 
     def _on_press(self, event):
         """Button-1 press: record start position; detect drag target."""
+        self.canvas.focus_set()
         self._drag_press_x = event.x
         self._drag_press_y = event.y
         self._drag_moved   = False
         self._drag_node_idx = -1
 
+        # In any pan mode, start panning immediately
+        if self._is_panning():
+            self._pan_dragging  = True
+            self._pan_start_x, self._pan_start_y = event.x, event.y
+            self._pan_start_ox, self._pan_start_oy = self.pan_x, self.pan_y
+            return
+
         if not self.grid_locked:
             return
         if self.edge_mode:
-            return
-        if self._alt_pan_active:
             return
 
         idx, _ = self._nearest_node(event.x, event.y, threshold=22)
@@ -1322,6 +1461,11 @@ class GraphOverlayApp:
 
     def _on_b1_motion(self, event):
         """B1-Motion: drag a node if one was pressed, else hover update."""
+        if self._pan_dragging and self._is_panning():
+            self.pan_x = self._pan_start_ox + (event.x - self._pan_start_x)
+            self.pan_y = self._pan_start_oy + (event.y - self._pan_start_y)
+            self.redraw()
+            return
         if self._alt_pan_active:
             return
         if not self.grid_locked:
@@ -1357,6 +1501,9 @@ class GraphOverlayApp:
 
     def _on_release(self, event):
         """ButtonRelease-1: if not dragged, treat as click."""
+        if self._pan_dragging and self._is_panning():
+            self._pan_dragging = False
+            return
         if self._alt_pan_active:
             return
         if not self.grid_locked:
@@ -1492,14 +1639,15 @@ class GraphOverlayApp:
         self.redraw()
 
     def _on_pan_start(self, event):
-        self._pan_dragging  = True
+        self._pan_dragging   = True
         self._alt_pan_active = True
         self._pan_start_x, self._pan_start_y = event.x, event.y
         self._pan_start_ox, self._pan_start_oy = self.pan_x, self.pan_y
         self.canvas.config(cursor="fleur")
 
     def _on_pan_motion(self, event):
-        if not self._pan_dragging: return
+        if not self._pan_dragging:
+            return
         self.pan_x = self._pan_start_ox + (event.x - self._pan_start_x)
         self.pan_y = self._pan_start_oy + (event.y - self._pan_start_y)
         self.redraw()
@@ -1507,7 +1655,8 @@ class GraphOverlayApp:
     def _on_pan_end(self, event):
         self._pan_dragging   = False
         self._alt_pan_active = False
-        self.canvas.config(cursor="crosshair" if self.grid_locked else "arrow")
+        if not self._pan_mode and not self._space_panning:
+            self.canvas.config(cursor="crosshair" if self.grid_locked else "arrow")
 
     def _on_scroll_mac(self, event):
         self._do_scroll(1.04 if event.delta > 0 else 0.96, event)
@@ -1564,6 +1713,7 @@ class GraphOverlayApp:
                                  before=self.lock_btn.master.winfo_children()[3])
             self.canvas.config(cursor="arrow")
             self.edge_mode = False; self._edge_src = None
+            self._pan_mode = False
         self.redraw()
 
     def _toggle_edge_mode(self):
@@ -1699,8 +1849,12 @@ class GraphOverlayApp:
     def _get_pywr_json(self):
         nodes = []
         for n in self.placed_nodes:
-            entry = {"name": n["name"], "type": n["type"],
-                     "comment": f"grid col={n['col']} row={n['row']}"}
+            entry = {
+                "name":     n["name"],
+                "type":     n["type"],
+                "position": {"schematic": [n["col"], n["row"]]},
+                "comment":  f"grid col={n['col']} row={n['row']}",
+            }
             ref_file = n.get("_ref_file", "")
             for k, v in n.get("params", {}).items():
                 vs = str(v).strip()
