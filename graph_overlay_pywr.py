@@ -1358,9 +1358,20 @@ class GraphOverlayApp:
             is_sel_edge = (edge["id"] == self._sel_edge_id)
             ecolor  = SEL_CLR if is_sel_edge else EDGE_CLR
             ewidth  = max(1, int(3*gz)) if is_sel_edge else max(1, int(2*gz))
-            ashape  = (max(6,10*gz), max(8,12*gz), max(3,4*gz))
-            c.create_line(ax,ay,bx,by,fill=ecolor,width=ewidth,
-                          arrow=tk.LAST,arrowshape=ashape)
+            # Fixed arrowhead size — always readable regardless of zoom
+            ashape  = (14, 16, 5)
+            # Shorten the line so it ends at the node edge, not the centre
+            # This keeps the arrowhead visible outside the node shape
+            node_r  = 14 * gz + 4
+            length  = math.hypot(bx - ax, by - ay)
+            if length > node_r * 2:
+                ratio = (length - node_r) / length
+                ex = ax + (bx - ax) * ratio
+                ey = ay + (by - ay) * ratio
+            else:
+                ex, ey = bx, by
+            c.create_line(ax, ay, ex, ey, fill=ecolor, width=ewidth,
+                          arrow=tk.LAST, arrowshape=ashape)
             # Edge name label (centred on the line)
             mx, my = (ax+bx)/2, (ay+by)/2
             c.create_text(mx, my-10, text=edge["name"],
