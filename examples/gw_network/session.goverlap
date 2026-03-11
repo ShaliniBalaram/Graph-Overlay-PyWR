@@ -1,0 +1,112 @@
+{
+  "grid_zoom": 1.0,
+  "global_zoom": 1.0,
+  "pan_x": 20.0,
+  "pan_y": 20.0,
+  "grid_opacity": 0.35,
+  "node_counter": 12,
+  "edge_counter": 11,
+  "bg_image_path": null,
+  "nodes": [
+    {
+      "id": 1,
+      "name": "Rainfall_Catchment",
+      "type": "catchment",
+      "col": 2.75, "row": 2.5,
+      "px": 110.0, "py": 100.0,
+      "params": {"flow": ""}
+    },
+    {
+      "id": 2,
+      "name": "GW_Base",
+      "type": "input",
+      "col": 6.75, "row": 6.75,
+      "px": 270.0, "py": 270.0,
+      "params": {"max_flow": "50.0", "min_flow": "0.0", "cost": "1.0"}
+    },
+    {
+      "id": 3,
+      "name": "GW_Topup",
+      "type": "input",
+      "col": 6.75, "row": 10.5,
+      "px": 270.0, "py": 420.0,
+      "params": {"max_flow": "20.0", "min_flow": "0.0", "cost": "5.0"}
+    },
+    {
+      "id": 4,
+      "name": "GW_Total",
+      "type": "link",
+      "col": 11.0, "row": 8.5,
+      "px": 440.0, "py": 340.0,
+      "params": {"cost": "0.0", "max_flow": "", "min_flow": "0.0"}
+    },
+    {
+      "id": 5,
+      "name": "River_Main",
+      "type": "river",
+      "col": 14.5, "row": 2.5,
+      "px": 580.0, "py": 100.0,
+      "params": {"cost": "0.0", "min_flow": "0.0"}
+    },
+    {
+      "id": 6,
+      "name": "River_Gauge_A",
+      "type": "rivergauge",
+      "col": 18.75, "row": 2.5,
+      "px": 750.0, "py": 100.0,
+      "params": {"mrf": "10.0", "mrf_cost": "-500.0", "cost": "0.0"}
+    },
+    {
+      "id": 7,
+      "name": "Reservoir_A",
+      "type": "reservoir",
+      "col": 23.5, "row": 2.5,
+      "px": 940.0, "py": 100.0,
+      "params": {"max_volume": "500.0", "min_volume": "50.0", "initial_volume": "350.0", "cost": "0.0"}
+    },
+    {
+      "id": 8,
+      "name": "River_Split_A",
+      "type": "riversplit",
+      "col": 27.5, "row": 7.25,
+      "px": 1100.0, "py": 290.0,
+      "params": {"factors": "0.6, 0.3, 0.1"}
+    },
+    {
+      "id": 9,
+      "name": "Demand_Urban",
+      "type": "output",
+      "col": 33.75, "row": 6.75,
+      "px": 1350.0, "py": 270.0,
+      "params": {"max_flow": "80.0", "min_flow": "0.0", "cost": "-200.0"}
+    },
+    {
+      "id": 10,
+      "name": "Demand_Irrigation",
+      "type": "output",
+      "col": 33.75, "row": 10.75,
+      "px": 1350.0, "py": 430.0,
+      "params": {"max_flow": "40.0", "min_flow": "0.0", "cost": "-100.0"}
+    },
+    {
+      "id": 11,
+      "name": "River_Outlet",
+      "type": "output",
+      "col": 33.75, "row": 2.5,
+      "px": 1350.0, "py": 100.0,
+      "params": {"max_flow": "", "min_flow": "0.0", "cost": "-500.0"}
+    }
+  ],
+  "edges": [
+    {"id": 1,  "src": 1,  "dst": 5,  "name": "Rainfall_to_River"},
+    {"id": 2,  "src": 2,  "dst": 4,  "name": "GW_Base_to_Total"},
+    {"id": 3,  "src": 3,  "dst": 4,  "name": "GW_Topup_to_Total"},
+    {"id": 4,  "src": 4,  "dst": 5,  "name": "GW_Total_to_River"},
+    {"id": 5,  "src": 5,  "dst": 6,  "name": "River_to_Gauge"},
+    {"id": 6,  "src": 6,  "dst": 7,  "name": "Gauge_to_Reservoir"},
+    {"id": 7,  "src": 7,  "dst": 8,  "name": "Reservoir_to_Split"},
+    {"id": 8,  "src": 8,  "dst": 9,  "name": "Split_to_Urban"},
+    {"id": 9,  "src": 8,  "dst": 10, "name": "Split_to_Irrigation"},
+    {"id": 10, "src": 8,  "dst": 11, "name": "Split_to_Outlet"}
+  ]
+}
