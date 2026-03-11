@@ -1878,6 +1878,17 @@ class GraphOverlayApp:
                                     "index_col": "Date",
                                     "parse_dates": True}
                 else:
+                    # Comma-separated numbers → JSON list (e.g. factors "0.5, 0.5")
+                    if "," in vs:
+                        try:
+                            parts = [
+                                float(x.strip()) if "." in x.strip() else int(x.strip())
+                                for x in vs.split(",") if x.strip()
+                            ]
+                            entry[k] = parts
+                            continue
+                        except ValueError:
+                            pass
                     try:
                         entry[k] = float(vs) if "." in vs else int(vs)
                     except ValueError:
@@ -1888,7 +1899,10 @@ class GraphOverlayApp:
         for edge in self.placed_edges:
             na, nb = self._node_by_id(edge["src"]), self._node_by_id(edge["dst"])
             if na and nb:
-                edges.append([na["name"], nb["name"]])
+                src_name = (na.get("name") or "").strip()
+                dst_name = (nb.get("name") or "").strip()
+                if src_name and dst_name:
+                    edges.append([src_name, dst_name])
 
         return {
             "metadata": {"title": "Graph Overlay Model",
