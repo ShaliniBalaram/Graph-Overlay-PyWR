@@ -842,7 +842,15 @@ class GraphOverlayApp:
 
         self._hsep()
 
-        # Split node
+        # Delete / Split row
+        action_row = tk.Frame(self.props_tab, bg=PANEL_BG)
+        action_row.pack(fill=tk.X, padx=10, pady=(0, 4))
+        tk.Button(action_row, text="Delete Node",
+                  command=self._delete_selected_node,
+                  bg="#2a2a35", fg="#ff6b6b", font=("Courier", 9, "bold"),
+                  relief="flat", padx=8, pady=4, cursor="hand2"
+                  ).pack(side=tk.LEFT, padx=(0, 6))
+
         split_row = tk.Frame(self.props_tab, bg=PANEL_BG)
         split_row.pack(fill=tk.X, padx=10, pady=(0, 8))
         tk.Label(split_row, text="Split node into:", bg=PANEL_BG, fg=DIM_CLR,
@@ -1055,6 +1063,20 @@ class GraphOverlayApp:
         if edge and self._ename_var:
             edge["name"] = self._ename_var.get()
             self.redraw()
+
+    def _delete_selected_node(self):
+        nid = self._sel_node_id
+        if nid is None:
+            return
+        self._push_undo()
+        self.placed_nodes  = [n for n in self.placed_nodes if n["id"] != nid]
+        self.placed_edges  = [e for e in self.placed_edges if e["src"] != nid and e["dst"] != nid]
+        self._sel_node_id  = None
+        if self._edge_src == nid:
+            self._edge_src = None
+        self._refresh_props()
+        self._refresh_export()
+        self.redraw()
 
     def _delete_selected_edge(self):
         self._push_undo()
