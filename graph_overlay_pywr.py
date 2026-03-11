@@ -7,28 +7,27 @@ graph-paper grid on a network diagram, placing typed nodes, drawing
 directed edges, and exporting for PyWR water resource models.
 
 Workflow:
-  Phase 1 – Load an image (optional) and calibrate grid scale with scroll wheel.
-  Phase 2 – Lock the grid, select a node type, click to place nodes,
-            draw edges, rename nodes by double-clicking, then export.
+  Phase 1 – Load an image (optional) and calibrate grid scale.
+  Phase 2 – Lock the grid. Click to place a node — the Properties panel
+            opens automatically so you can set Name, Type, and Parameters.
+            Click an existing node to re-open its properties. Draw edges,
+            then export to CSV or PyWR JSON.
 
 Controls:
   Scroll Wheel        → Grid zoom (before lock) / View zoom (after lock)
-  Left Click          → Place node  /  Select node in edge mode
-  Double-Click        → Rename node
+  Left Click          → Place new node OR select existing node
   Middle-Drag         → Pan
-  Alt+Drag            → Pan (alternative — no middle button)
+  Alt+Drag            → Pan (no middle button)
   Right-Click         → Remove nearest node or edge
-  Escape              → Cancel edge selection
+  Escape              → Deselect node / cancel edge selection
 """
 
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, simpledialog
+from tkinter import ttk, filedialog, messagebox
 import json
 import csv
 import math
 import platform
-import sys
-import os
 
 try:
     from PIL import Image, ImageTk
@@ -54,8 +53,9 @@ TEXT_CLR   = "#cccccc"
 DIM_CLR    = "#666666"
 EDGE_CLR   = "#ff922b"
 SEL_CLR    = "#ffdd00"
+ENTRY_BG   = "#22222e"
 
-# PyWR node types and their display colors
+# PyWR node types and colours
 PYWR_NODE_TYPES = [
     "catchment", "river", "reservoir", "storage",
     "demand", "link", "output", "river_gauge", "river_split", "other",
@@ -71,6 +71,22 @@ PYWR_COLORS = {
     "river_gauge": "#cc5de8",
     "river_split": "#f783ac",
     "other":       "#00ffa3",
+}
+
+# Suggested PyWR parameters per node type (name → default value)
+TYPE_DEFAULTS: dict[str, dict[str, str]] = {
+    "catchment":   {"flow": ""},
+    "river":       {"cost": "0.0", "min_flow": "0.0"},
+    "reservoir":   {"max_volume": "", "min_volume": "0.0",
+                    "initial_volume": "", "cost": "0.0"},
+    "storage":     {"max_volume": "", "min_volume": "0.0",
+                    "initial_volume": "", "cost": "0.0"},
+    "demand":      {"max_flow": "", "cost": "-10.0"},
+    "link":        {"cost": "0.0", "max_flow": "", "min_flow": "0.0"},
+    "output":      {"max_flow": "", "cost": "-500.0"},
+    "river_gauge": {"flow_parameter": "", "threshold": ""},
+    "river_split": {"factors": "0.5, 0.5"},
+    "other":       {},
 }
 
 # Sample network (shown when no image is loaded)
@@ -90,16 +106,16 @@ NODE_MAP = {n["id"]: n for n in SAMPLE_NODES}
 
 
 class GraphOverlayApp:
-    """Main application — PyWR Edition."""
+    """Main application — PyWR Edition with Node Properties panel."""
 
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Graph Overlay Tool — PyWR Edition")
         self.root.configure(bg=BG)
-        self.root.geometry("1200x780")
-        self.root.minsize(900, 550)
+        self.root.geometry("1300x800")
+        self.root.minsize(950, 580)
 
-        # ── State ──────────────────────────────────────────────────────────
+        # ── Core state ─────────────────────────────────────────────────────
         self.grid_zoom    = 1.0
         self.global_zoom  = 1.0
         self.grid_locked  = False
@@ -109,15 +125,18 @@ class GraphOverlayApp:
         self.show_network = True
 
         self.placed_nodes: list[dict]  = []
-        self.placed_edges: list[tuple] = []   # list of (id_a, id_b)
+        self.placed_edges: list[tuple] = []
         self.node_counter = 1
 
-        self.edge_mode = False    # are we in edge-drawing mode?
-        self._edge_src = None     # id of first selected node in edge mode
+        self.edge_mode     = False
+        self._edge_src     = None
+
+        # Selection
+        self._selected_id  = None   # id of selected node (for property editing)
 
         # Background image
-        self._bg_image = None     # PIL Image
-        self._bg_photo = None     # ImageTk (must be kept alive)
+        self._bg_image = None
+        self._bg_photo = None
 
         # Pan drag
         self._pan_dragging = False
@@ -126,14 +145,17 @@ class GraphOverlayApp:
         self._pan_start_ox = 0.0
         self._pan_start_oy = 0.0
 
-        # Hover crosshair
+        # Hover
         self._hover_coord  = None
         self._hover_screen = (0, 0)
 
-        self.export_visible = False
+        # Props panel live vars (rebuilt per selection)
+        self._name_var     = None
+        self._type_var     = None
+        self._param_vars: dict[str, tk.StringVar] = {}
 
-        # Current node type for new placements
-        self._node_type_var = tk.StringVar(value="river")
+        # Default node type for new placements (toolbar dropdown)
+        self._new_node_type = tk.StringVar(value="river")
 
         # ── Build UI ───────────────────────────────────────────────────────
         self._build_toolbar()
@@ -156,26 +178,24 @@ class GraphOverlayApp:
                  font=("Courier", 11, "bold")).pack(side=tk.LEFT, padx=(0, 10))
 
         tk.Button(inner, text="Load Image", command=self._load_image,
-                  **self._btn_opts()).pack(side=tk.LEFT, padx=2)
-
+                  **self._btn()).pack(side=tk.LEFT, padx=2)
         self._sep(inner)
 
-        # Grid scale controls
+        # Grid scale
         self.grid_frame = tk.Frame(inner, bg=PANEL_BG)
         self.grid_frame.pack(side=tk.LEFT, padx=4)
         tk.Label(self.grid_frame, text="Grid Scale", bg=PANEL_BG, fg=DIM_CLR,
                  font=("Courier", 9)).pack(side=tk.LEFT, padx=(0, 4))
         tk.Button(self.grid_frame, text="−", command=self._grid_zoom_out,
-                  **self._btn_opts()).pack(side=tk.LEFT)
+                  **self._btn()).pack(side=tk.LEFT)
         self.grid_zoom_lbl = tk.Label(self.grid_frame, text="1.00×", width=6,
                                       bg=PANEL_BG, fg=TEXT_CLR, font=("Courier", 10))
         self.grid_zoom_lbl.pack(side=tk.LEFT)
         tk.Button(self.grid_frame, text="+", command=self._grid_zoom_in,
-                  **self._btn_opts()).pack(side=tk.LEFT)
-
+                  **self._btn()).pack(side=tk.LEFT)
         self._sep(inner)
 
-        # Opacity slider
+        # Opacity
         tk.Label(inner, text="Opacity", bg=PANEL_BG, fg=DIM_CLR,
                  font=("Courier", 9)).pack(side=tk.LEFT, padx=(4, 4))
         self.opacity_var = tk.DoubleVar(value=self.grid_opacity)
@@ -184,63 +204,59 @@ class GraphOverlayApp:
         self.opacity_lbl = tk.Label(inner, text="45%", width=4, bg=PANEL_BG,
                                     fg=DIM_CLR, font=("Courier", 9))
         self.opacity_lbl.pack(side=tk.LEFT)
-
         self._sep(inner)
 
-        # Lock grid button
+        # Lock
         self.lock_btn = tk.Button(inner, text="🔓 Lock Grid",
-                                  command=self._toggle_lock, **self._btn_opts(wide=True))
+                                  command=self._toggle_lock, **self._btn(wide=True))
         self.lock_btn.pack(side=tk.LEFT, padx=4)
 
-        # ── Post-lock controls (hidden until grid is locked) ──
+        # Post-lock controls
         self.post_lock_frame = tk.Frame(inner, bg=PANEL_BG)
 
         self._sep(self.post_lock_frame)
         tk.Label(self.post_lock_frame, text="View Zoom", bg=PANEL_BG, fg=DIM_CLR,
                  font=("Courier", 9)).pack(side=tk.LEFT, padx=(4, 4))
         tk.Button(self.post_lock_frame, text="−", command=self._global_zoom_out,
-                  **self._btn_opts()).pack(side=tk.LEFT)
+                  **self._btn()).pack(side=tk.LEFT)
         self.global_zoom_lbl = tk.Label(self.post_lock_frame, text="1.00×", width=6,
                                         bg=PANEL_BG, fg=TEXT_CLR, font=("Courier", 10))
         self.global_zoom_lbl.pack(side=tk.LEFT)
         tk.Button(self.post_lock_frame, text="+", command=self._global_zoom_in,
-                  **self._btn_opts()).pack(side=tk.LEFT)
+                  **self._btn()).pack(side=tk.LEFT)
         tk.Button(self.post_lock_frame, text="Reset", command=self._reset_view,
-                  **self._btn_opts()).pack(side=tk.LEFT, padx=(4, 0))
-
+                  **self._btn()).pack(side=tk.LEFT, padx=(4, 0))
         self._sep(self.post_lock_frame)
 
-        # Node type dropdown
-        tk.Label(self.post_lock_frame, text="Node Type", bg=PANEL_BG, fg=DIM_CLR,
+        # Default node type (used when clicking empty canvas)
+        tk.Label(self.post_lock_frame, text="New Node", bg=PANEL_BG, fg=DIM_CLR,
                  font=("Courier", 9)).pack(side=tk.LEFT, padx=(4, 2))
-        ttk.Combobox(self.post_lock_frame, textvariable=self._node_type_var,
-                     values=PYWR_NODE_TYPES, state="readonly", width=12,
+        ttk.Combobox(self.post_lock_frame, textvariable=self._new_node_type,
+                     values=PYWR_NODE_TYPES, state="readonly", width=11,
                      font=("Courier", 9)).pack(side=tk.LEFT)
-
         self._sep(self.post_lock_frame)
 
-        # Edge mode toggle
+        # Edge mode
         self.edge_btn = tk.Button(self.post_lock_frame, text="Draw Edge",
-                                  command=self._toggle_edge_mode, **self._btn_opts())
+                                  command=self._toggle_edge_mode, **self._btn())
         self.edge_btn.pack(side=tk.LEFT, padx=2)
-
         self._sep(self.post_lock_frame)
 
         tk.Button(self.post_lock_frame, text="Undo", command=self._undo_node,
-                  **self._btn_opts(fg="#ff6b6b")).pack(side=tk.LEFT, padx=2)
-        tk.Button(self.post_lock_frame, text="Clear", command=self._clear_nodes,
-                  **self._btn_opts(fg="#ff6b6b")).pack(side=tk.LEFT, padx=2)
+                  **self._btn(fg="#ff6b6b")).pack(side=tk.LEFT, padx=2)
+        tk.Button(self.post_lock_frame, text="Clear All", command=self._clear_nodes,
+                  **self._btn(fg="#ff6b6b")).pack(side=tk.LEFT, padx=2)
 
-        # Right-side controls
+        # Right: Export tab toggle
         right = tk.Frame(inner, bg=PANEL_BG)
         right.pack(side=tk.RIGHT)
-
-        self.export_btn = tk.Button(right, text="Export Positions",
-                                    command=self._toggle_export, **self._btn_opts(wide=True))
-        self.export_btn.pack(side=tk.RIGHT, padx=(4, 0))
+        self.export_tab_btn = tk.Button(right, text="Export Panel",
+                                        command=self._switch_to_export,
+                                        **self._btn(wide=True))
+        self.export_tab_btn.pack(side=tk.RIGHT, padx=(4, 0))
 
         self.net_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(right, text="Sample Network", variable=self.net_var,
+        tk.Checkbutton(right, text="Sample Net", variable=self.net_var,
                        bg=PANEL_BG, fg=DIM_CLR, selectcolor=BG,
                        activebackground=PANEL_BG, activeforeground=TEXT_CLR,
                        font=("Courier", 9), command=self._on_toggle_network
@@ -250,12 +266,11 @@ class GraphOverlayApp:
         self.main_frame = tk.Frame(self.root, bg=BG)
         self.main_frame.pack(fill=tk.BOTH, expand=True)
 
+        # Canvas
         self.canvas = tk.Canvas(self.main_frame, bg=BG, highlightthickness=0, cursor="arrow")
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # Event bindings
         self.canvas.bind("<Button-1>",          self._on_click)
-        self.canvas.bind("<Double-Button-1>",   self._on_double_click)
         self.canvas.bind("<Motion>",            self._on_motion)
         self.canvas.bind("<Button-2>",          self._on_pan_start)
         self.canvas.bind("<B2-Motion>",         self._on_pan_motion)
@@ -275,8 +290,30 @@ class GraphOverlayApp:
             self.canvas.bind("<Button-4>",   lambda e: self._do_scroll(1.08, e))
             self.canvas.bind("<Button-5>",   lambda e: self._do_scroll(0.92, e))
 
-        self.export_panel = tk.Frame(self.main_frame, bg=PANEL_BG, width=330)
-        self.export_text  = None
+        # ── Right panel (always present, tabbed) ──
+        self.right_panel = tk.Frame(self.main_frame, bg=PANEL_BG, width=340)
+        self.right_panel.pack(side=tk.RIGHT, fill=tk.Y)
+        self.right_panel.pack_propagate(False)
+
+        # Style notebook for dark theme
+        style = ttk.Style()
+        style.configure("Dark.TNotebook",        background=PANEL_BG, borderwidth=0)
+        style.configure("Dark.TNotebook.Tab",    background=BORDER_CLR, foreground=DIM_CLR,
+                         font=("Courier", 9, "bold"), padding=[10, 4])
+        style.map("Dark.TNotebook.Tab",
+                  background=[("selected", ACCENT)],
+                  foreground=[("selected", BG)])
+
+        self.notebook = ttk.Notebook(self.right_panel, style="Dark.TNotebook")
+        self.notebook.pack(fill=tk.BOTH, expand=True)
+
+        self.props_tab   = tk.Frame(self.notebook, bg=PANEL_BG)
+        self.export_tab  = tk.Frame(self.notebook, bg=PANEL_BG)
+        self.notebook.add(self.props_tab,  text=" Properties ")
+        self.notebook.add(self.export_tab, text="  Export  ")
+
+        self._refresh_props()
+        self._refresh_export()
 
     def _build_statusbar(self):
         bar = tk.Frame(self.root, bg=PANEL_BG)
@@ -290,7 +327,7 @@ class GraphOverlayApp:
     # ══════════════════════════════════════════════════════════════════════════
 
     @staticmethod
-    def _btn_opts(fg=TEXT_CLR, wide=False):
+    def _btn(fg=TEXT_CLR, wide=False):
         return dict(bg="#2a2a35", fg=fg, activebackground="#3a3a48",
                     activeforeground="#ffffff", relief="flat", bd=0,
                     font=("Courier", 10, "bold"),
@@ -307,31 +344,27 @@ class GraphOverlayApp:
         gx  = (sx - self.pan_x) / self.global_zoom
         gy  = (sy - self.pan_y) / self.global_zoom
         egs = self.effective_grid_size
-        return {
-            "col": round(gx / egs, 2),
-            "row": round(gy / egs, 2),
-            "px":  round(gx, 1),
-            "py":  round(gy, 1),
-        }
+        return {"col": round(gx / egs, 2), "row": round(gy / egs, 2),
+                "px":  round(gx, 1),       "py":  round(gy, 1)}
 
     def world_to_screen(self, wx, wy):
         return (wx * self.global_zoom + self.pan_x,
                 wy * self.global_zoom + self.pan_y)
 
-    def _node_by_id(self, node_id):
+    def _node_by_id(self, nid):
         for n in self.placed_nodes:
-            if n["id"] == node_id:
+            if n["id"] == nid:
                 return n
         return None
 
-    def _nearest_placed_node(self, ex, ey, threshold=30):
+    def _nearest_placed_node(self, ex, ey, threshold=25):
         best_i, best_d = -1, float("inf")
         for i, nd in enumerate(self.placed_nodes):
             sx, sy = self.world_to_screen(nd["px"], nd["py"])
             d = math.hypot(ex - sx, ey - sy)
             if d < best_d:
                 best_d, best_i = d, i
-        if best_d < threshold * self.global_zoom and best_i >= 0:
+        if best_d < threshold * max(1.0, self.global_zoom) and best_i >= 0:
             return best_i, best_d
         return -1, float("inf")
 
@@ -340,8 +373,236 @@ class GraphOverlayApp:
         dx, dy = bx - ax, by - ay
         if dx == 0 and dy == 0:
             return math.hypot(px - ax, py - ay)
-        t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)))
-        return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+        t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / (dx*dx + dy*dy)))
+        return math.hypot(px - (ax + t*dx), py - (ay + t*dy))
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Node Properties Panel
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _refresh_props(self):
+        """Rebuild the Properties tab for the currently selected node."""
+        for w in self.props_tab.winfo_children():
+            w.destroy()
+        self._param_vars.clear()
+
+        nd = self._node_by_id(self._selected_id)
+
+        if nd is None:
+            # No selection — placeholder
+            tk.Label(self.props_tab,
+                     text="\n  Click a node to\n  view / edit its\n  properties.",
+                     bg=PANEL_BG, fg=DIM_CLR, font=("Courier", 10),
+                     justify="left").pack(pady=50, padx=14, anchor="w")
+            tk.Label(self.props_tab,
+                     text="  Or place a new node —\n  the panel opens automatically.",
+                     bg=PANEL_BG, fg="#444455", font=("Courier", 9),
+                     justify="left").pack(padx=14, anchor="w")
+            return
+
+        # ── Header ──
+        color = PYWR_COLORS.get(nd["type"], NODE_CLR)
+        hdr = tk.Frame(self.props_tab, bg=color)
+        hdr.pack(fill=tk.X)
+        tk.Label(hdr, text=f"  NODE #{nd['id']}",
+                 bg=color, fg=BG, font=("Courier", 11, "bold"),
+                 anchor="w", pady=6).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Button(hdr, text="✕", command=self._deselect,
+                  bg=color, fg=BG, font=("Courier", 10, "bold"), relief="flat",
+                  padx=8, cursor="hand2").pack(side=tk.RIGHT)
+
+        tk.Label(self.props_tab,
+                 text=f"  col={nd['col']}  row={nd['row']}",
+                 bg=PANEL_BG, fg=DIM_CLR, font=("Courier", 8),
+                 anchor="w").pack(fill=tk.X, pady=(4, 0))
+
+        self._hsep()
+
+        # ── Name ──
+        self._field_label("Name")
+        self._name_var = tk.StringVar(value=nd["name"])
+        e = tk.Entry(self.props_tab, textvariable=self._name_var,
+                     bg=ENTRY_BG, fg=TEXT_CLR, font=("Courier", 10),
+                     relief="flat", insertbackground=TEXT_CLR)
+        e.pack(fill=tk.X, padx=10, pady=(0, 6))
+        self._name_var.trace_add("write", lambda *_: self._apply_name())
+
+        # ── Type ──
+        self._field_label("Type")
+        self._type_var = tk.StringVar(value=nd["type"])
+        cb = ttk.Combobox(self.props_tab, textvariable=self._type_var,
+                          values=PYWR_NODE_TYPES, state="readonly",
+                          font=("Courier", 10))
+        cb.pack(fill=tk.X, padx=10, pady=(0, 2))
+        self._type_var.trace_add("write", lambda *_: self._apply_type())
+
+        self._hsep()
+
+        # ── Parameters ──
+        phdr = tk.Frame(self.props_tab, bg=PANEL_BG)
+        phdr.pack(fill=tk.X, padx=10, pady=(4, 2))
+        tk.Label(phdr, text="PARAMETERS", bg=PANEL_BG, fg=NODE_CLR,
+                 font=("Courier", 9, "bold")).pack(side=tk.LEFT)
+        tk.Button(phdr, text="↺ load defaults", command=self._load_defaults,
+                  bg=PANEL_BG, fg=DIM_CLR, font=("Courier", 8), relief="flat",
+                  padx=4, cursor="hand2").pack(side=tk.RIGHT)
+
+        # Scrollable params area
+        outer = tk.Frame(self.props_tab, bg=PANEL_BG)
+        outer.pack(fill=tk.BOTH, expand=True, padx=10)
+
+        pcanvas = tk.Canvas(outer, bg=PANEL_BG, highlightthickness=0, height=260)
+        psb     = ttk.Scrollbar(outer, orient="vertical", command=pcanvas.yview)
+        self._params_inner = tk.Frame(pcanvas, bg=PANEL_BG)
+        self._params_inner.bind(
+            "<Configure>",
+            lambda e: pcanvas.configure(scrollregion=pcanvas.bbox("all")))
+        pcanvas.create_window((0, 0), window=self._params_inner, anchor="nw")
+        pcanvas.configure(yscrollcommand=psb.set)
+        pcanvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        psb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self._pcanvas = pcanvas   # keep ref for mousewheel binding
+        self._bind_scroll(pcanvas)
+        self._rebuild_param_rows(nd)
+
+        self._hsep()
+
+        # ── Add custom parameter ──
+        tk.Label(self.props_tab, text="Add parameter", bg=PANEL_BG, fg=DIM_CLR,
+                 font=("Courier", 8), anchor="w").pack(fill=tk.X, padx=10)
+        add_row = tk.Frame(self.props_tab, bg=PANEL_BG)
+        add_row.pack(fill=tk.X, padx=10, pady=(2, 6))
+
+        self._new_key_var = tk.StringVar()
+        self._new_val_var = tk.StringVar()
+        tk.Entry(add_row, textvariable=self._new_key_var, bg=ENTRY_BG, fg=TEXT_CLR,
+                 font=("Courier", 9), relief="flat", width=11,
+                 insertbackground=TEXT_CLR).pack(side=tk.LEFT, padx=(0, 2))
+        tk.Entry(add_row, textvariable=self._new_val_var, bg=ENTRY_BG, fg=NODE_CLR,
+                 font=("Courier", 9), relief="flat", width=9,
+                 insertbackground=NODE_CLR).pack(side=tk.LEFT, padx=(0, 2))
+        tk.Button(add_row, text="+ Add", command=self._add_custom_param,
+                  bg=ACCENT, fg=BG, font=("Courier", 9, "bold"), relief="flat",
+                  padx=4, pady=1, cursor="hand2").pack(side=tk.LEFT)
+
+    def _rebuild_param_rows(self, nd):
+        """Populate the scrollable param table from nd['params']."""
+        for w in self._params_inner.winfo_children():
+            w.destroy()
+        self._param_vars.clear()
+
+        if not nd.get("params"):
+            tk.Label(self._params_inner,
+                     text="  (no parameters — click ↺ load defaults\n   or add custom below)",
+                     bg=PANEL_BG, fg="#444455", font=("Courier", 8),
+                     justify="left").pack(anchor="w", pady=6)
+            return
+
+        for key, val in nd["params"].items():
+            self._add_param_row_widget(nd, key, str(val))
+
+    def _add_param_row_widget(self, nd, key, val):
+        """Add one key-value row widget."""
+        row = tk.Frame(self._params_inner, bg=PANEL_BG)
+        row.pack(fill=tk.X, pady=1)
+
+        tk.Label(row, text=key, bg=PANEL_BG, fg=TEXT_CLR,
+                 font=("Courier", 9), width=15, anchor="w").pack(side=tk.LEFT)
+
+        var = tk.StringVar(value=val)
+        self._param_vars[key] = var
+
+        e = tk.Entry(row, textvariable=var, bg=ENTRY_BG, fg=NODE_CLR,
+                     font=("Courier", 9), relief="flat", width=9,
+                     insertbackground=NODE_CLR)
+        e.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 2))
+
+        def on_change(*args, k=key, v=var):
+            n = self._node_by_id(self._selected_id)
+            if n:
+                n["params"][k] = v.get()
+        var.trace_add("write", on_change)
+
+        def remove(k=key):
+            n = self._node_by_id(self._selected_id)
+            if n and k in n.get("params", {}):
+                del n["params"][k]
+            self._rebuild_param_rows(n)
+        tk.Button(row, text="✕", command=remove,
+                  bg=PANEL_BG, fg="#554444", font=("Courier", 8), relief="flat",
+                  padx=2, cursor="hand2").pack(side=tk.LEFT)
+
+    def _apply_name(self):
+        nd = self._node_by_id(self._selected_id)
+        if nd and self._name_var:
+            nd["name"] = self._name_var.get()
+            self.redraw()
+
+    def _apply_type(self):
+        nd = self._node_by_id(self._selected_id)
+        if nd and self._type_var:
+            nd["type"] = self._type_var.get()
+            self._new_node_type.set(nd["type"])   # sync toolbar dropdown
+            self.redraw()
+
+    def _load_defaults(self):
+        """Merge type-default parameters into the selected node (don't overwrite)."""
+        nd = self._node_by_id(self._selected_id)
+        if nd is None:
+            return
+        defaults = TYPE_DEFAULTS.get(nd["type"], {})
+        if not defaults:
+            return
+        params = nd.setdefault("params", {})
+        for k, v in defaults.items():
+            if k not in params:
+                params[k] = v
+        self._rebuild_param_rows(nd)
+
+    def _add_custom_param(self):
+        key = (self._new_key_var.get() if self._new_key_var else "").strip()
+        val = (self._new_val_var.get() if self._new_val_var else "").strip()
+        if not key:
+            return
+        nd = self._node_by_id(self._selected_id)
+        if nd is None:
+            return
+        params = nd.setdefault("params", {})
+        params[key] = val
+        self._new_key_var.set("")
+        self._new_val_var.set("")
+        self._rebuild_param_rows(nd)
+
+    def _deselect(self):
+        self._selected_id = None
+        self._refresh_props()
+        self.redraw()
+
+    def _field_label(self, text):
+        tk.Label(self.props_tab, text=text, bg=PANEL_BG, fg=DIM_CLR,
+                 font=("Courier", 8), anchor="w").pack(fill=tk.X, padx=10, pady=(6, 1))
+
+    def _hsep(self):
+        tk.Frame(self.props_tab, height=1, bg=BORDER_CLR).pack(fill=tk.X, padx=6, pady=4)
+
+    def _bind_scroll(self, widget):
+        """Bind mousewheel to a canvas widget for scrolling."""
+        if platform.system() == "Darwin":
+            widget.bind("<MouseWheel>",
+                        lambda e: widget.yview_scroll(-1 if e.delta > 0 else 1, "units"))
+        else:
+            widget.bind("<MouseWheel>",
+                        lambda e: widget.yview_scroll(-1 if e.delta > 0 else 1, "units"))
+            widget.bind("<Button-4>", lambda e: widget.yview_scroll(-1, "units"))
+            widget.bind("<Button-5>", lambda e: widget.yview_scroll(1,  "units"))
+
+    def _switch_to_export(self):
+        self.notebook.select(1)
+        self._refresh_export()
+
+    def _switch_to_props(self):
+        self.notebook.select(0)
 
     # ══════════════════════════════════════════════════════════════════════════
     # Image Loading
@@ -349,14 +610,12 @@ class GraphOverlayApp:
 
     def _load_image(self):
         if not PIL_AVAILABLE:
-            messagebox.showwarning(
-                "Pillow Not Installed",
-                "Install Pillow to load background images:\n\n  pip install pillow")
+            messagebox.showwarning("Pillow Not Installed",
+                                   "pip install pillow")
             return
         path = filedialog.askopenfilename(
             title="Open Background Image",
-            filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp *.gif *.tiff"),
-                       ("All files", "*.*")])
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp *.tiff"), ("All", "*.*")])
         if not path:
             return
         try:
@@ -384,137 +643,131 @@ class GraphOverlayApp:
         step       = egs * gz
         major_step = step * MAJOR_EVERY
 
-        # ── Background image ──
+        # Background image
         if self._bg_image:
             iw = max(1, int(self._bg_image.width  * gz))
             ih = max(1, int(self._bg_image.height * gz))
-            resized        = self._bg_image.resize((iw, ih), Image.LANCZOS)
-            self._bg_photo = ImageTk.PhotoImage(resized)
+            self._bg_photo = ImageTk.PhotoImage(
+                self._bg_image.resize((iw, ih), Image.LANCZOS))
             c.create_image(self.pan_x, self.pan_y, anchor="nw", image=self._bg_photo)
 
-        # ── Grid color blending ──
-        base_r, base_g, base_b = 0x7c, 0x7c, 0xff
-        bg_r,   bg_g,   bg_b   = 0x0e, 0x0e, 0x12
+        # Grid colours
+        def blend(op, br=0x7c, bg=0x7c, bb=0xff, dr=0x0e, dg=0x0e, db=0x12):
+            return (f"#{int(dr+(br-dr)*op):02x}"
+                    f"{int(dg+(bg-dg)*op):02x}"
+                    f"{int(db+(bb-db)*op):02x}")
 
-        def blend(op):
-            r = int(bg_r + (base_r - bg_r) * op)
-            g = int(bg_g + (base_g - bg_g) * op)
-            b = int(bg_b + (base_b - bg_b) * op)
-            return f"#{r:02x}{g:02x}{b:02x}"
+        minor = blend(self.grid_opacity * 0.35)
+        major = blend(self.grid_opacity * 0.70)
+        label = blend(self.grid_opacity * 0.50)
 
-        minor_color = blend(self.grid_opacity * 0.35)
-        major_color = blend(self.grid_opacity * 0.70)
-        label_color = blend(self.grid_opacity * 0.50)
-
-        # Minor grid lines
         if step >= 4:
             ox, oy = self.pan_x % step, self.pan_y % step
             x = ox
             while x < w:
-                c.create_line(x, 0, x, h, fill=minor_color, width=1)
-                x += step
+                c.create_line(x, 0, x, h, fill=minor, width=1); x += step
             y = oy
             while y < h:
-                c.create_line(0, y, w, y, fill=minor_color, width=1)
-                y += step
+                c.create_line(0, y, w, y, fill=minor, width=1); y += step
 
-        # Major grid lines + axis labels
         if major_step >= 8:
             ox, oy = self.pan_x % major_step, self.pan_y % major_step
             x = ox
             while x < w:
-                c.create_line(x, 0, x, h, fill=major_color, width=1)
-                col_idx = round((x - self.pan_x) / step)
-                c.create_text(x, 10, text=str(col_idx), fill=label_color,
-                              font=("Courier", 8), anchor="n")
+                c.create_line(x, 0, x, h, fill=major, width=1)
+                c.create_text(x, 10, text=str(round((x-self.pan_x)/step)),
+                              fill=label, font=("Courier", 8), anchor="n")
                 x += major_step
             y = oy
             while y < h:
-                c.create_line(0, y, w, y, fill=major_color, width=1)
-                row_idx = round((y - self.pan_y) / step)
-                c.create_text(8, y, text=str(row_idx), fill=label_color,
-                              font=("Courier", 8), anchor="w")
+                c.create_line(0, y, w, y, fill=major, width=1)
+                c.create_text(8, y, text=str(round((y-self.pan_y)/step)),
+                              fill=label, font=("Courier", 8), anchor="w")
                 y += major_step
 
-        # ── Sample network ──
+        # Sample network
         if self.show_network and not self._bg_image:
             for a_id, b_id in SAMPLE_EDGES:
-                a = NODE_MAP[a_id]
-                b = NODE_MAP[b_id]
+                a, b = NODE_MAP[a_id], NODE_MAP[b_id]
                 ax, ay = self.world_to_screen(a["x"], a["y"])
                 bx, by = self.world_to_screen(b["x"], b["y"])
                 c.create_line(ax, ay, bx, by, fill="#444444", width=1, dash=(6, 3))
             for n in SAMPLE_NODES:
                 sx, sy = self.world_to_screen(n["x"], n["y"])
-                ro, ri = 16 * gz, 9 * gz
-                c.create_oval(sx - ro, sy - ro, sx + ro, sy + ro,
-                              fill="", outline=n["color"], width=1)
-                c.create_oval(sx - ri, sy - ri, sx + ri, sy + ri,
-                              fill=n["color"], outline="")
+                ro, ri = 16*gz, 9*gz
+                c.create_oval(sx-ro,sy-ro,sx+ro,sy+ro, fill="", outline=n["color"], width=1)
+                c.create_oval(sx-ri,sy-ri,sx+ri,sy+ri, fill=n["color"], outline="")
                 c.create_text(sx, sy, text=n["id"], fill="white",
-                              font=("Courier", max(8, int(10 * gz)), "bold"))
+                              font=("Courier", max(8, int(10*gz)), "bold"))
 
-        # ── Placed edges (directed arrows) ──
+        # Placed edges
         for (ia, ib) in self.placed_edges:
-            na = self._node_by_id(ia)
-            nb = self._node_by_id(ib)
+            na, nb = self._node_by_id(ia), self._node_by_id(ib)
             if na and nb:
                 ax, ay = self.world_to_screen(na["px"], na["py"])
                 bx, by = self.world_to_screen(nb["px"], nb["py"])
-                arrow_shape = (max(6, 10 * gz), max(8, 12 * gz), max(3, 4 * gz))
+                ashape = (max(6,10*gz), max(8,12*gz), max(3,4*gz))
                 c.create_line(ax, ay, bx, by, fill=EDGE_CLR,
-                              width=max(1, int(2 * gz)),
-                              arrow=tk.LAST, arrowshape=arrow_shape)
-                mx, my = (ax + bx) / 2, (ay + by) / 2
-                c.create_text(mx, my - 9, text=f"{na['name']}→{nb['name']}",
-                              fill=EDGE_CLR, font=("Courier", max(7, int(8 * gz))))
+                              width=max(1,int(2*gz)), arrow=tk.LAST, arrowshape=ashape)
+                c.create_text((ax+bx)/2, (ay+by)/2 - 9,
+                              text=f"{na['name']}→{nb['name']}",
+                              fill=EDGE_CLR, font=("Courier", max(7,int(8*gz))))
 
-        # ── Placed nodes ──
+        # Placed nodes
         for nd in self.placed_nodes:
             sx, sy  = self.world_to_screen(nd["px"], nd["py"])
             color   = PYWR_COLORS.get(nd["type"], NODE_CLR)
-            is_sel  = (self.edge_mode and self._edge_src == nd["id"])
-            ro, ri  = 14 * gz, 5 * gz
-            outline = SEL_CLR if is_sel else color
-            width   = 3 if is_sel else 2
-            c.create_oval(sx - ro, sy - ro, sx + ro, sy + ro,
-                          outline=outline, width=width, fill=BG)
-            c.create_oval(sx - ri, sy - ri, sx + ri, sy + ri,
-                          fill=color, outline="")
-            label = f"{nd['name']} [{nd['type'][:3]}]  ({nd['col']}, {nd['row']})"
-            c.create_text(sx + 17 * gz, sy - 12 * gz, text=label,
-                          fill=color, font=("Courier", max(7, int(9 * gz))), anchor="w")
+            is_sel  = (nd["id"] == self._selected_id)
+            is_esrc = (self.edge_mode and self._edge_src == nd["id"])
+            ro, ri  = 14*gz, 5*gz
 
-        # ── Hover crosshair + tooltip ──
+            if is_sel:
+                # Selection glow
+                c.create_oval(sx-ro-4, sy-ro-4, sx+ro+4, sy+ro+4,
+                              outline=SEL_CLR, width=2, fill="", dash=(4,3))
+            if is_esrc:
+                c.create_oval(sx-ro-4, sy-ro-4, sx+ro+4, sy+ro+4,
+                              outline=SEL_CLR, width=3, fill="")
+
+            c.create_oval(sx-ro, sy-ro, sx+ro, sy+ro,
+                          outline=color, width=2 if not is_sel else 3, fill=BG)
+            c.create_oval(sx-ri, sy-ri, sx+ri, sy+ri, fill=color, outline="")
+
+            # Label
+            n_params = len(nd.get("params", {}))
+            param_hint = f" +{n_params}p" if n_params else ""
+            label = f"{nd['name']} [{nd['type'][:3]}]{param_hint}  ({nd['col']},{nd['row']})"
+            c.create_text(sx + 17*gz, sy - 12*gz, text=label,
+                          fill=SEL_CLR if is_sel else color,
+                          font=("Courier", max(7, int(9*gz))), anchor="w")
+
+        # Hover crosshair
         if self.grid_locked and self._hover_coord and not self.edge_mode:
             hx, hy = self._hover_screen
             c.create_line(hx, 0, hx, h, fill=NODE_CLR, width=1, dash=(3, 5))
             c.create_line(0, hy, w, hy, fill=NODE_CLR, width=1, dash=(3, 5))
             coord = self._hover_coord
             txt = f"col:{coord['col']}  row:{coord['row']}"
-            c.create_rectangle(hx + 14, hy - 28, hx + 14 + len(txt) * 7 + 12, hy - 8,
-                               fill=BG, outline=ACCENT, width=1)
-            c.create_text(hx + 20, hy - 18, text=txt, fill=NODE_CLR,
+            c.create_rectangle(hx+14, hy-28, hx+14+len(txt)*7+12, hy-8,
+                               fill=BG, outline=ACCENT)
+            c.create_text(hx+20, hy-18, text=txt, fill=NODE_CLR,
                           font=("Courier", 9), anchor="w")
 
-        # ── Calibration hint ──
+        # Calibration hint
         if not self.grid_locked:
             hint = "Scroll to calibrate grid scale  →  then click  Lock Grid"
-            tw = len(hint) * 7
-            cx = w // 2
-            c.create_rectangle(cx - tw // 2 - 12, 14, cx + tw // 2 + 12, 40,
-                               fill=BG, outline=ACCENT, width=1)
+            tw, cx = len(hint)*7, w//2
+            c.create_rectangle(cx-tw//2-12, 14, cx+tw//2+12, 40, fill=BG, outline=ACCENT)
             c.create_text(cx, 27, text=hint, fill=ACCENT, font=("Courier", 10))
 
-        # ── Status bar ──
+        # Status bar
         mode  = "View Zoom" if self.grid_locked else "Grid Scale"
-        emode = ("  │  EDGE MODE: click source then target node  (Esc = cancel)"
-                 if self.edge_mode else "")
+        emode = "  │  EDGE MODE: click source → target  (Esc=cancel)" if self.edge_mode else ""
+        sel   = f"  │  Selected: {self._node_by_id(self._selected_id)['name']}" if self._selected_id else ""
         self.status_lbl.config(
             text=(f"Grid: {egs:.1f}px/unit   Zoom: {self.global_zoom:.2f}×   "
-                  f"Nodes: {len(self.placed_nodes)}   Edges: {len(self.placed_edges)}   "
-                  f"Scroll = {mode}   Mid-Drag/Alt+Drag = Pan   Right-Click = Remove"
-                  f"{emode}")
+                  f"Nodes: {len(self.placed_nodes)}   Edges: {len(self.placed_edges)}"
+                  f"{sel}   Scroll={mode}   Mid-Drag=Pan   Right-Click=Remove{emode}")
         )
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -526,24 +779,37 @@ class GraphOverlayApp:
             return
         if self.edge_mode:
             self._handle_edge_click(event)
+            return
+
+        # Click near existing node → select it
+        idx, _ = self._nearest_placed_node(event.x, event.y, threshold=20)
+        if idx >= 0:
+            self._selected_id = self.placed_nodes[idx]["id"]
+            self._refresh_props()
+            self._switch_to_props()
         else:
+            # Empty canvas → place new node, then open its properties
             self._place_node(event)
+            self._selected_id = self.placed_nodes[-1]["id"]
+            self._refresh_props()
+            self._switch_to_props()
+        self.redraw()
 
     def _place_node(self, event):
         coord = self.screen_to_grid(event.x, event.y)
-        ntype = self._node_type_var.get()
+        ntype = self._new_node_type.get()
         node  = {
-            "id":   self.node_counter,
-            "name": f"N{self.node_counter}",
-            "type": ntype,
-            "col":  coord["col"],
-            "row":  coord["row"],
-            "px":   coord["px"],
-            "py":   coord["py"],
+            "id":     self.node_counter,
+            "name":   f"N{self.node_counter}",
+            "type":   ntype,
+            "col":    coord["col"],
+            "row":    coord["row"],
+            "px":     coord["px"],
+            "py":     coord["py"],
+            "params": dict(TYPE_DEFAULTS.get(ntype, {})),   # pre-fill defaults
         }
         self.placed_nodes.append(node)
         self.node_counter += 1
-        self.redraw()
         self._refresh_export()
 
     def _handle_edge_click(self, event):
@@ -563,33 +829,11 @@ class GraphOverlayApp:
             self._edge_src = None
         self.redraw()
 
-    def _on_double_click(self, event):
-        if not self.grid_locked or self.edge_mode:
-            return
-        idx, _ = self._nearest_placed_node(event.x, event.y)
-        if idx < 0:
-            return
-        nd       = self.placed_nodes[idx]
-        new_name = simpledialog.askstring(
-            "Rename Node",
-            f"New name for node '{nd['name']}':",
-            initialvalue=nd["name"],
-            parent=self.root)
-        if new_name and new_name.strip():
-            nd["name"] = new_name.strip()
-            self.redraw()
-            self._refresh_export()
-
     def _on_right_click(self, event):
-        if not self.placed_nodes and not self.placed_edges:
-            return
-        # Find nearest node
         idx, d_node = self._nearest_placed_node(event.x, event.y, threshold=30)
-        # Find nearest edge
         best_e, best_ed = -1, float("inf")
         for i, (ia, ib) in enumerate(self.placed_edges):
-            na = self._node_by_id(ia)
-            nb = self._node_by_id(ib)
+            na, nb = self._node_by_id(ia), self._node_by_id(ib)
             if na and nb:
                 ax, ay = self.world_to_screen(na["px"], na["py"])
                 bx, by = self.world_to_screen(nb["px"], nb["py"])
@@ -598,14 +842,14 @@ class GraphOverlayApp:
                     best_ed, best_e = d, i
 
         if idx >= 0 and d_node <= best_ed:
-            # Remove node and its connected edges
             removed_id = self.placed_nodes.pop(idx)["id"]
-            self.placed_edges = [
-                (a, b) for (a, b) in self.placed_edges
-                if a != removed_id and b != removed_id
-            ]
+            self.placed_edges = [(a,b) for (a,b) in self.placed_edges
+                                 if a != removed_id and b != removed_id]
             if self._edge_src == removed_id:
                 self._edge_src = None
+            if self._selected_id == removed_id:
+                self._selected_id = None
+                self._refresh_props()
         elif best_e >= 0 and best_ed < 15:
             self.placed_edges.pop(best_e)
 
@@ -629,15 +873,15 @@ class GraphOverlayApp:
     def _on_escape(self, event):
         if self.edge_mode and self._edge_src is not None:
             self._edge_src = None
-            self.redraw()
+        elif self._selected_id is not None:
+            self._deselect()
+        self.redraw()
 
     # Pan
     def _on_pan_start(self, event):
         self._pan_dragging = True
-        self._pan_start_x  = event.x
-        self._pan_start_y  = event.y
-        self._pan_start_ox = self.pan_x
-        self._pan_start_oy = self.pan_y
+        self._pan_start_x, self._pan_start_y = event.x, event.y
+        self._pan_start_ox, self._pan_start_oy = self.pan_x, self.pan_y
         self.canvas.config(cursor="fleur")
 
     def _on_pan_motion(self, event):
@@ -665,7 +909,7 @@ class GraphOverlayApp:
         else:
             old = self.global_zoom
             self.global_zoom = max(MIN_GLOBAL_ZOOM, min(MAX_GLOBAL_ZOOM, old * factor))
-            scale   = self.global_zoom / old
+            scale = self.global_zoom / old
             self.pan_x = event.x - scale * (event.x - self.pan_x)
             self.pan_y = event.y - scale * (event.y - self.pan_y)
             self.global_zoom_lbl.config(text=f"{self.global_zoom:.2f}×")
@@ -673,34 +917,27 @@ class GraphOverlayApp:
 
     # Toolbar actions
     def _grid_zoom_in(self):
-        if self.grid_locked:
-            return
+        if self.grid_locked: return
         self.grid_zoom = min(MAX_GRID_ZOOM, self.grid_zoom * 1.2)
-        self.grid_zoom_lbl.config(text=f"{self.grid_zoom:.2f}×")
-        self.redraw()
+        self.grid_zoom_lbl.config(text=f"{self.grid_zoom:.2f}×"); self.redraw()
 
     def _grid_zoom_out(self):
-        if self.grid_locked:
-            return
+        if self.grid_locked: return
         self.grid_zoom = max(MIN_GRID_ZOOM, self.grid_zoom / 1.2)
-        self.grid_zoom_lbl.config(text=f"{self.grid_zoom:.2f}×")
-        self.redraw()
+        self.grid_zoom_lbl.config(text=f"{self.grid_zoom:.2f}×"); self.redraw()
 
     def _global_zoom_in(self):
         self.global_zoom = min(MAX_GLOBAL_ZOOM, self.global_zoom * 1.2)
-        self.global_zoom_lbl.config(text=f"{self.global_zoom:.2f}×")
-        self.redraw()
+        self.global_zoom_lbl.config(text=f"{self.global_zoom:.2f}×"); self.redraw()
 
     def _global_zoom_out(self):
         self.global_zoom = max(MIN_GLOBAL_ZOOM, self.global_zoom / 1.2)
-        self.global_zoom_lbl.config(text=f"{self.global_zoom:.2f}×")
-        self.redraw()
+        self.global_zoom_lbl.config(text=f"{self.global_zoom:.2f}×"); self.redraw()
 
     def _reset_view(self):
         self.global_zoom = 1.0
         self.pan_x = self.pan_y = 0.0
-        self.global_zoom_lbl.config(text="1.00×")
-        self.redraw()
+        self.global_zoom_lbl.config(text="1.00×"); self.redraw()
 
     def _toggle_lock(self):
         self.grid_locked = not self.grid_locked
@@ -715,8 +952,7 @@ class GraphOverlayApp:
             self.grid_frame.pack(side=tk.LEFT, padx=4,
                                  before=self.lock_btn.master.winfo_children()[3])
             self.canvas.config(cursor="arrow")
-            self.edge_mode = False
-            self._edge_src = None
+            self.edge_mode = False; self._edge_src = None
         self.redraw()
 
     def _toggle_edge_mode(self):
@@ -729,149 +965,138 @@ class GraphOverlayApp:
     def _undo_node(self):
         if self.placed_nodes:
             removed_id = self.placed_nodes.pop()["id"]
-            self.placed_edges = [
-                (a, b) for (a, b) in self.placed_edges
-                if a != removed_id and b != removed_id
-            ]
-            self.redraw()
-            self._refresh_export()
+            self.placed_edges = [(a,b) for (a,b) in self.placed_edges
+                                 if a != removed_id and b != removed_id]
+            if self._selected_id == removed_id:
+                self._selected_id = None; self._refresh_props()
+            self.redraw(); self._refresh_export()
 
     def _clear_nodes(self):
-        self.placed_nodes.clear()
-        self.placed_edges.clear()
-        self.node_counter = 1
-        self._edge_src    = None
-        self.redraw()
-        self._refresh_export()
+        self.placed_nodes.clear(); self.placed_edges.clear()
+        self.node_counter = 1; self._edge_src = None
+        self._selected_id = None
+        self._refresh_props(); self.redraw(); self._refresh_export()
 
     def _on_opacity(self, val):
         self.grid_opacity = float(val)
-        self.opacity_lbl.config(text=f"{int(self.grid_opacity * 100)}%")
-        self.redraw()
+        self.opacity_lbl.config(text=f"{int(self.grid_opacity * 100)}%"); self.redraw()
 
     def _on_toggle_network(self):
-        self.show_network = self.net_var.get()
-        self.redraw()
+        self.show_network = self.net_var.get(); self.redraw()
 
     # ══════════════════════════════════════════════════════════════════════════
-    # Export Panel
+    # Export Tab
     # ══════════════════════════════════════════════════════════════════════════
 
-    def _toggle_export(self):
-        self.export_visible = not self.export_visible
-        if self.export_visible:
-            self.export_panel.pack(side=tk.RIGHT, fill=tk.Y)
-            self._build_export_content()
-            self.export_btn.config(bg="#339af0", fg="white")
-        else:
-            self.export_panel.pack_forget()
-            self.export_btn.config(bg="#2a2a35", fg=TEXT_CLR)
-
-    def _build_export_content(self):
-        for w in self.export_panel.winfo_children():
+    def _refresh_export(self):
+        for w in self.export_tab.winfo_children():
             w.destroy()
 
-        tk.Label(self.export_panel, text="EXPORT — PyWR EDITION", bg=PANEL_BG,
-                 fg=NODE_CLR, font=("Courier", 11, "bold"), anchor="w"
+        tk.Label(self.export_tab, text="EXPORT — PyWR", bg=PANEL_BG, fg=NODE_CLR,
+                 font=("Courier", 11, "bold"), anchor="w"
                  ).pack(fill=tk.X, padx=10, pady=(10, 2))
-        tk.Label(self.export_panel,
-                 text=(f"Grid unit = {self.effective_grid_size:.1f}px  |  "
-                       f"{len(self.placed_nodes)} nodes  {len(self.placed_edges)} edges"),
+        tk.Label(self.export_tab,
+                 text=f"{len(self.placed_nodes)} nodes   {len(self.placed_edges)} edges",
                  bg=PANEL_BG, fg=DIM_CLR, font=("Courier", 9), anchor="w"
                  ).pack(fill=tk.X, padx=10, pady=(0, 8))
 
         if not self.placed_nodes:
-            tk.Label(self.export_panel, text="Place nodes on the canvas first.",
+            tk.Label(self.export_tab, text="Place nodes first.",
                      bg=PANEL_BG, fg="#555555", font=("Courier", 9)).pack(pady=30)
             return
 
-        # ── Node table ──
-        hdr = tk.Frame(self.export_panel, bg="#1e1e28")
+        # Node table
+        hdr = tk.Frame(self.export_tab, bg="#1e1e28")
         hdr.pack(fill=tk.X, padx=10)
-        for col_name, cw in [("#", 3), ("Name", 8), ("Type", 10), ("Col", 6), ("Row", 6)]:
+        for col_name, cw in [("#",3),("Name",8),("Type",10),("Col",5),("Row",5),("P",2)]:
             tk.Label(hdr, text=col_name, bg="#1e1e28", fg=ACCENT,
                      font=("Courier", 9, "bold"), width=cw, anchor="w"
                      ).pack(side=tk.LEFT, padx=2, pady=3)
 
-        row_canvas = tk.Canvas(self.export_panel, bg=PANEL_BG, highlightthickness=0, height=160)
-        sb = ttk.Scrollbar(self.export_panel, orient="vertical", command=row_canvas.yview)
-        sf = tk.Frame(row_canvas, bg=PANEL_BG)
-        sf.bind("<Configure>", lambda e: row_canvas.configure(scrollregion=row_canvas.bbox("all")))
-        row_canvas.create_window((0, 0), window=sf, anchor="nw")
-        row_canvas.configure(yscrollcommand=sb.set)
+        rc = tk.Canvas(self.export_tab, bg=PANEL_BG, highlightthickness=0, height=140)
+        sb = ttk.Scrollbar(self.export_tab, orient="vertical", command=rc.yview)
+        sf = tk.Frame(rc, bg=PANEL_BG)
+        sf.bind("<Configure>", lambda e: rc.configure(scrollregion=rc.bbox("all")))
+        rc.create_window((0, 0), window=sf, anchor="nw")
+        rc.configure(yscrollcommand=sb.set)
 
         for nd in self.placed_nodes:
             rf    = tk.Frame(sf, bg=PANEL_BG)
             rf.pack(fill=tk.X)
             color = PYWR_COLORS.get(nd["type"], NODE_CLR)
-            for val, cw in [(nd["id"], 3), (nd["name"], 8), (nd["type"], 10),
-                             (nd["col"], 6), (nd["row"], 6)]:
+            n_p   = len(nd.get("params", {}))
+            for val, cw in [(nd["id"],3),(nd["name"],8),(nd["type"],10),
+                             (nd["col"],5),(nd["row"],5),(n_p,2)]:
                 tk.Label(rf, text=str(val), bg=PANEL_BG, fg=color,
                          font=("Courier", 9), width=cw, anchor="w"
                          ).pack(side=tk.LEFT, padx=2, pady=1)
 
-        row_canvas.pack(fill=tk.BOTH, expand=True, padx=10)
+        rc.pack(fill=tk.BOTH, expand=False, padx=10)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # ── Edge list ──
+        # Edges
         if self.placed_edges:
-            tk.Label(self.export_panel, text="EDGES", bg=PANEL_BG, fg=EDGE_CLR,
+            tk.Label(self.export_tab, text="EDGES", bg=PANEL_BG, fg=EDGE_CLR,
                      font=("Courier", 9, "bold"), anchor="w"
                      ).pack(fill=tk.X, padx=10, pady=(6, 2))
-            ef = tk.Frame(self.export_panel, bg=PANEL_BG, height=70)
-            ef.pack(fill=tk.X, padx=10)
-            ef.pack_propagate(False)
+            ef = tk.Frame(self.export_tab, bg=PANEL_BG, height=60)
+            ef.pack(fill=tk.X, padx=10); ef.pack_propagate(False)
             for (ia, ib) in self.placed_edges:
-                na = self._node_by_id(ia)
-                nb = self._node_by_id(ib)
+                na, nb = self._node_by_id(ia), self._node_by_id(ib)
                 if na and nb:
                     tk.Label(ef, text=f"  {na['name']}  →  {nb['name']}",
                              bg=PANEL_BG, fg=EDGE_CLR, font=("Courier", 9),
                              anchor="w").pack(fill=tk.X)
 
-        # ── PyWR JSON preview ──
-        tk.Label(self.export_panel, text="PyWR JSON preview", bg=PANEL_BG, fg=DIM_CLR,
+        # JSON preview
+        tk.Label(self.export_tab, text="PyWR JSON preview", bg=PANEL_BG, fg=DIM_CLR,
                  font=("Courier", 9, "bold"), anchor="w"
                  ).pack(fill=tk.X, padx=10, pady=(8, 2))
-        self.export_text = tk.Text(self.export_panel, bg=BG, fg=TEXT_CLR,
-                                   font=("Courier", 9), height=7, wrap=tk.WORD,
-                                   relief="flat", bd=0, padx=8, pady=6)
-        self.export_text.pack(fill=tk.X, padx=10)
-        self._update_json_display()
+        txt = tk.Text(self.export_tab, bg=BG, fg=TEXT_CLR,
+                      font=("Courier", 9), height=8, wrap=tk.WORD,
+                      relief="flat", bd=0, padx=8, pady=6)
+        txt.pack(fill=tk.X, padx=10)
+        txt.insert("1.0", json.dumps(self._get_pywr_json(), indent=2))
+        txt.config(state="disabled")
 
-        # ── Export buttons ──
-        btn_frame = tk.Frame(self.export_panel, bg=PANEL_BG)
+        # Buttons
+        btn_frame = tk.Frame(self.export_tab, bg=PANEL_BG)
         btn_frame.pack(fill=tk.X, padx=10, pady=8)
         for label, cmd, bg, fg in [
-            ("Copy JSON", self._copy_json,      ACCENT,    BG),
-            ("Save JSON", self._save_json,       "#339af0", "white"),
-            ("Save CSV",  self._save_csv,        "#51cf66", BG),
-            ("PyWR JSON", self._save_pywr_json,  "#fcc419", BG),
+            ("Copy",     self._copy_json,      ACCENT,    BG),
+            ("JSON",     self._save_json,       "#339af0", "white"),
+            ("CSV",      self._save_csv,        "#51cf66", BG),
+            ("PyWR JSON",self._save_pywr_json,  "#fcc419", BG),
         ]:
             tk.Button(btn_frame, text=label, command=cmd, bg=bg, fg=fg,
                       font=("Courier", 9, "bold"), relief="flat",
-                      padx=4, pady=4, cursor="hand2"
+                      padx=4, pady=5, cursor="hand2"
                       ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=1)
 
+    # ── Export data builders ─────────────────────────────────────────────────
+
     def _get_export_data(self):
-        """Flat list of nodes with both grid and pixel coords."""
         return [
             {"id": n["id"], "name": n["name"], "type": n["type"],
              "grid": {"col": n["col"], "row": n["row"]},
-             "pixel": {"x": n["px"], "y": n["py"]}}
+             "pixel": {"x": n["px"], "y": n["py"]},
+             "params": n.get("params", {})}
             for n in self.placed_nodes
         ]
 
     def _get_pywr_json(self):
-        """Build a PyWR-compatible model skeleton."""
-        nodes = [
-            {
-                "name": n["name"],
-                "type": n["type"],
-                "comment": f"grid col={n['col']} row={n['row']}",
-            }
-            for n in self.placed_nodes
-        ]
+        nodes = []
+        for n in self.placed_nodes:
+            entry = {"name": n["name"], "type": n["type"],
+                     "comment": f"grid col={n['col']} row={n['row']}"}
+            for k, v in n.get("params", {}).items():
+                if str(v).strip():
+                    try:
+                        entry[k] = float(v) if "." in str(v) else int(v)
+                    except ValueError:
+                        entry[k] = v
+            nodes.append(entry)
+
         edges = [
             [self._node_by_id(a)["name"], self._node_by_id(b)["name"]]
             for (a, b) in self.placed_edges
@@ -883,71 +1108,64 @@ class GraphOverlayApp:
                 "description":     "Generated by Graph Overlay Tool — PyWR Edition",
                 "minimum_version": "0.1",
             },
-            "timestepper": {
-                "start":    "2000-01-01",
-                "end":      "2000-12-31",
-                "timestep": 1,
-            },
+            "timestepper": {"start": "2000-01-01", "end": "2000-12-31", "timestep": 1},
             "nodes":      nodes,
             "edges":      edges,
             "parameters": {},
             "recorders":  {},
         }
 
-    def _update_json_display(self):
-        if self.export_text:
-            self.export_text.delete("1.0", tk.END)
-            self.export_text.insert("1.0", json.dumps(self._get_pywr_json(), indent=2))
-
-    def _refresh_export(self):
-        if self.export_visible:
-            self._build_export_content()
-
     def _copy_json(self):
         self.root.clipboard_clear()
         self.root.clipboard_append(json.dumps(self._get_export_data(), indent=2))
-        messagebox.showinfo("Copied", "Node positions JSON copied to clipboard!")
+        messagebox.showinfo("Copied", "Copied to clipboard!")
 
     def _save_json(self):
-        path = filedialog.asksaveasfilename(
-            defaultextension=".json",
-            filetypes=[("JSON", "*.json"), ("All files", "*.*")])
+        path = filedialog.asksaveasfilename(defaultextension=".json",
+            filetypes=[("JSON", "*.json"), ("All", "*.*")])
         if path:
             with open(path, "w") as f:
                 json.dump(self._get_export_data(), f, indent=2)
-            messagebox.showinfo("Saved", f"Saved to:\n{path}")
+            messagebox.showinfo("Saved", f"Saved:\n{path}")
 
     def _save_csv(self):
-        """Export nodes as CSV — id, name, type, col, row, px, py."""
-        path = filedialog.asksaveasfilename(
-            defaultextension=".csv",
+        """Export nodes as CSV. Parameters become extra columns."""
+        path = filedialog.asksaveasfilename(defaultextension=".csv",
             initialfile="nodes",
-            filetypes=[("CSV", "*.csv"), ("All files", "*.*")])
+            filetypes=[("CSV", "*.csv"), ("All", "*.*")])
         if not path:
             return
+        # Gather all unique param keys across all nodes
+        all_param_keys: list[str] = []
+        for n in self.placed_nodes:
+            for k in n.get("params", {}):
+                if k not in all_param_keys:
+                    all_param_keys.append(k)
+
+        base_fields = ["id", "name", "type", "col", "row", "px", "py"]
+        fieldnames  = base_fields + all_param_keys
+
         with open(path, "w", newline="") as f:
-            writer = csv.DictWriter(
-                f, fieldnames=["id", "name", "type", "col", "row", "px", "py"])
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
             writer.writeheader()
             for n in self.placed_nodes:
-                writer.writerow({k: n[k] for k in ["id", "name", "type", "col", "row", "px", "py"]})
-        messagebox.showinfo("Saved", f"CSV saved to:\n{path}")
+                row = {k: n[k] for k in base_fields}
+                row.update(n.get("params", {}))
+                writer.writerow(row)
+        messagebox.showinfo("Saved", f"CSV saved:\n{path}")
 
     def _save_pywr_json(self):
-        """Export a PyWR-compatible model JSON skeleton."""
-        path = filedialog.asksaveasfilename(
-            defaultextension=".json",
+        path = filedialog.asksaveasfilename(defaultextension=".json",
             initialfile="pywr_model",
-            filetypes=[("JSON", "*.json"), ("All files", "*.*")])
+            filetypes=[("JSON", "*.json"), ("All", "*.*")])
         if path:
             with open(path, "w") as f:
                 json.dump(self._get_pywr_json(), f, indent=2)
-            messagebox.showinfo("Saved", f"PyWR model saved to:\n{path}")
+            messagebox.showinfo("Saved", f"PyWR model saved:\n{path}")
 
 
 def main():
     root = tk.Tk()
-
     if platform.system() == "Windows":
         try:
             from ctypes import windll
@@ -958,12 +1176,10 @@ def main():
             root.update()
             from ctypes import windll, c_int, byref
             windll.dwmapi.DwmSetWindowAttribute(
-                windll.user32.GetParent(root.winfo_id()),
-                20, byref(c_int(1)), 4)
+                windll.user32.GetParent(root.winfo_id()), 20, byref(c_int(1)), 4)
         except Exception:
             pass
-
-    app = GraphOverlayApp(root)
+    GraphOverlayApp(root)
     root.mainloop()
 
 
